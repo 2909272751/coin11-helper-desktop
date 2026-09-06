@@ -1,0 +1,13 @@
+# Coin11 助手轻量版 —— 图像 / OCR 基础（锁定，Windows x64，Python 3.12 x64）
+#
+# 由桌面内“下载中心”用参数列表 pip 安装到用户数据运行时；来源为官方 PyPI
+# （https://pypi.org/simple）。与 desktop_app/runtime_components.py 的
+# REQS_OCR 保持同源（任何修改必须两处同步）。
+#
+# 注意：不引入 opencv-python-headless，避免与 opencv-python 双份并存冲突
+# （完整路径 build.ps1 的注释即该问题的历史现场）。
+numpy==2.1.3
+Pillow==10.4.0
+opencv-python==4.13.0.92
+ddddocr==1.5.6
+easyocr==1.7.2

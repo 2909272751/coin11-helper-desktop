@@ -1,0 +1,8 @@
+# Coin11 助手轻量版 —— CPU torch（锁定，Windows x64，Python 3.12 x64，CPU）
+#
+# 由桌面内“下载中心”用参数列表 pip 安装到用户数据运行时；来源为 PyTorch 官方
+# CPU wheel index（https://download.pytorch.org/whl/cpu，HTTPS allowlist 精确成员）。
+# 与 desktop_app/runtime_components.py 的 REQS_TORCH 保持同源。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+torchvision==0.21.0+cpu

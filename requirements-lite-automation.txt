@@ -1,0 +1,8 @@
+# Coin11 助手轻量版 —— 自动化依赖（锁定，Windows x64，Python 3.12 x64）
+#
+# 由桌面内“下载中心”用参数列表 pip 安装到用户数据运行时；来源为官方 PyPI
+# （https://pypi.org/simple）。与 desktop_app/runtime_components.py 的
+# REQS_AUTOMATION 保持同源（任何修改必须两处同步）。
+uiautomator2==3.5.2
+uiautodev==0.14.0
+requests==2.32.3

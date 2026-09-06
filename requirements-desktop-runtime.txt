@@ -1,0 +1,23 @@
+# Coin11 助手桌面版 —— 完整运行时锁定依赖（Windows x64，Python 3.12 x64，CPU）
+#
+# 用途：scripts/build.ps1 用它在项目内 .build/runtime-base 构建“可移动完整运行时”，
+#       打包进发行目录 runtime/python/（自包含 site-packages，不依赖用户全局环境）。
+# 来源：PyTorch 官方 CPU wheel index + PyPI。版本均实测可在 CPython 3.12 x64 安装。
+# 本文件不用于用户的全局安装；构建脚本不会把任何依赖写入系统 site-packages。
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- 设备自动化 / 网络（任务运行必需） ---
+uiautomator2==3.5.2
+uiautodev==0.14.0
+requests==2.32.3
+
+# --- 图像与 OCR 基础 ---
+numpy==2.1.3
+Pillow==10.4.0
+opencv-python==4.13.0.92
+ddddocr==1.5.6
+easyocr==1.7.2
+
+# --- CPU PyTorch（官方 CPU index；与 easyocr/torchvision 配套锁定） ---
+torch==2.6.0+cpu
+torchvision==0.21.0+cpu

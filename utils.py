@@ -32,7 +32,19 @@ urllib.request.install_opener(opener)
 # from paddleocr import PaddleOCR
 from PIL import Image
 import easyocr
-easyocr_reader = easyocr.Reader(['ch_sim', 'en'], gpu=True)
+
+# === Coin11 桌面版受控兼容补丁（BEGIN）===
+# 桌面发行版默认使用 CPU 推理并把模型目录指到发行内置的离线模型目录；
+# COIN11_EASYOCR_MODEL_DIR 未设置时保持上游可运行默认（联网自动下载）。
+# 环境变量注入发生在 TaskRunner 启动脚本之前；此处为桌面外直跑也提供默认。
+import os as _coin11_runtime_os
+_easyocr_model_dir = _coin11_runtime_os.environ.get("COIN11_EASYOCR_MODEL_DIR", "")
+_easyocr_kwargs = {"gpu": False}
+if _easyocr_model_dir:
+    _easyocr_kwargs["model_storage_directory"] = _easyocr_model_dir
+    _easyocr_kwargs["download_enabled"] = False
+easyocr_reader = easyocr.Reader(['ch_sim', 'en'], **_easyocr_kwargs)
+# === Coin11 桌面版受控兼容补丁（END）===
 
 
 # 关闭 ppocr 的所有日志（推荐）
@@ -521,6 +533,16 @@ def set_terminal_title(title):
 
 # 从已连接的设备中，返回用户选中的设备序列号
 def select_device():
+    # === Coin11 桌面版受控兼容补丁（BEGIN）===
+    # 桌面应用通过环境变量注入明确设备：存在且处于 device 状态时直接返回，
+    # 不改动命令行/交互式用户的原有行为。
+    import os as _coin11_os
+    _coin11_serial = _coin11_os.environ.get("COIN11_DEVICE_SERIAL")
+    if _coin11_serial:
+        if _coin11_serial in get_connected_devices():
+            set_terminal_title(_coin11_serial)
+            return _coin11_serial
+    # === Coin11 桌面版受控兼容补丁（END）===
     # 获取所有连接的设备
     devices = get_connected_devices()
 
