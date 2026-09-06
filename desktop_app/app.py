@@ -1,10 +1,18 @@
 """Coin11 助手桌面版主窗口（PySide6）。
 
-0.3.0 界面（现代浅色卡片布局）：
-- 标题区：Coin11 logo + 应用名 + 连接状态胶囊；
-- 设备 / 上游脚本 / 任务（日常 + 可折叠的限时活动）/ 运行控制 / 日志分区卡片；
-- 任务区为可滚动卡片/分组，含描述与状态标签；按钮主次层级与禁用态；
-- 日志区深色等宽字体，带“自动滚动”与“仅看错误”过滤。
+0.4.1 界面（现代浅色毛玻璃运行页，任务执行为中心）：
+- 顶部品牌条：Coin11 logo + 应用名 + 连接状态胶囊 + 设置与关于；
+- 顶部工具条：设备下拉 + 刷新（设备选择保留在一级），`设备 ▾` 二级菜单收纳
+  “重新接管 ADB”与“设备连接说明”；`维护与更新 ▾` 菜单收纳原“运行组件”与
+  “上游脚本版本”两张常驻大卡的全部动作（下载中心 / 重新检测组件 / 运行时目录 /
+  同步最新脚本 / 恢复上一版 / 打开日志目录 / 复制诊断文本）；
+- 任务清单是窗口的弹性主体：滚动区与底部“全选 / 取消选择 / 限时活动”工具栏是
+  结构分离的独立 layout 层次（工具栏固定于卡片底部，绝不被滚动区内容挤出，
+  也不随滚动内容增长而位移），任务行为紧凑单行：勾选 + 标题 + 状态标签，
+  描述进 tooltip，不再单独占行；
+- 运行控制：开始 / 停止 / 状态胶囊 / 当前状态 / 任务计数 / 进度；
+- 实时日志：默认折叠为简短状态条（显示最近一行输出），可展开查看完整日志；
+  自动滚动 / 仅看错误 / 复制 / 打开目录在展开态可用。
 
 运行模型：
 - 全部系统调用（ADB / 任务子进程）在后台线程执行；设备断线看门狗在
@@ -13,6 +21,12 @@
 - 任务运行期间显示当前任务、实时日志、已用时、队列进度（i/n）与不确定
   进度动画；每个任务结束显示成功/失败/取消/跳过。
 - 单实例：第二次启动激活已有窗口；关窗即退出应用并停止后台子进程。
+- 保留：任务实时日志、ADB 私有服务退出清理、断线停任务、运行组件下载中心、
+  脚本同步/回退、单实例、下载依赖安全边界。
+
+视觉：纯 QSS 实现的“毛玻璃感”——半透明白卡叠在柔和浅色渐变底上、细边框、
+圆角、青绿强调、克制阴影，不依赖系统透明/毛玻璃特效；无特效支持时文本保持
+高对比、布局仍可读。
 """
 from __future__ import annotations
 
@@ -54,38 +68,53 @@ except Exception:  # pragma: no cover
 APP_ID = "Coin11Helper.DesktopWrapper.0.3"
 
 # --------------------------------------------------------------------- 主题
+# 毛玻璃感：柔和渐变底 + 半透明白卡 + 细边框。全部为 QSS 绘制的视觉层次，
+# 不依赖系统透明/毛玻璃特效；文本色保持足够对比，无特效环境同样可读。
 
-C_BG = "#f4f7f6"          # 窗口浅灰
-C_CARD = "#ffffff"        # 卡片白
-C_PRIMARY = "#0e7d74"     # 柔和深青绿（主色）
+C_BG_TOP = "#eef6f4"        # 窗口背景渐变起点（浅青）
+C_BG_BOTTOM = "#e4efec"     # 窗口背景渐变终点（浅灰绿）
+C_CARD = "rgba(255,255,255,0.78)"   # 半透明白卡（毛玻璃感主体）
+C_CARD_SOLID = "#ffffff"
+C_PRIMARY = "#0e7d74"       # 柔和深青绿（主色）
 C_PRIMARY_HOVER = "#0a6a63"
 C_PRIMARY_DISABLED = "#9cc7c3"
-C_TEXT = "#22302e"
-C_TEXT_SUB = "#5b6b68"
-C_BORDER = "#e2e9e7"
+C_TEXT = "#1c2b29"
+C_TEXT_SUB = "#4f615d"
+C_BORDER = "rgba(130,158,152,0.45)"
 C_RUNNING = "#0e7d74"
-C_OK = "#1a7f37"
-C_ERR = "#b42318"
-C_CANCEL = "#9a6700"
-C_SKIP = "#6b7280"
+C_OK = "#14662b"
+C_ERR = "#a33a2f"
+C_CANCEL = "#8a5a00"
+C_SKIP = "#5f6b72"
 
 QSS = f"""
 * {{ font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif; }}
-QMainWindow, QWidget#root {{ background: {C_BG}; }}
+QMainWindow, QWidget#root {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 {C_BG_TOP}, stop:1 {C_BG_BOTTOM});
+}}
 QWidget {{ color: {C_TEXT}; font-size: 13px; }}
-QToolTip {{ background: #2b2b2b; color: #f0f0f0; border: none; padding: 6px; }}
+QToolTip {{
+    background: #24312f; color: #f3f8f7; border: none;
+    padding: 6px 8px; border-radius: 4px;
+}}
 
-/* 卡片 */
+/* ---- 玻璃卡片 ---- */
 QFrame#card {{
     background: {C_CARD}; border: 1px solid {C_BORDER};
-    border-radius: 10px;
+    border-radius: 12px;
 }}
-QLabel#cardTitle {{ font-size: 15px; font-weight: 600; color: {C_TEXT}; }}
+QFrame#card:disabled {{ background: {C_CARD_SOLID}; }}
+QLabel#cardTitle {{ font-size: 14px; font-weight: 600; color: {C_TEXT}; }}
 QLabel#cardHint {{ font-size: 12px; color: {C_TEXT_SUB}; }}
-QLabel#sectionTitle {{ font-size: 13px; font-weight: 600; color: {C_TEXT}; }}
+QLabel#sectionTitle {{ font-size: 12px; font-weight: 600; color: {C_TEXT_SUB}; }}
 
-/* 品牌条 */
-QFrame#brandBar {{ background: {C_PRIMARY}; border: none; border-radius: 10px; }}
+/* ---- 品牌条（实心青绿，保证顶部对比） ---- */
+QFrame#brandBar {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #0f8378, stop:1 #0b6b63);
+    border: none; border-radius: 12px;
+}}
 QLabel#brandName {{ font-size: 20px; font-weight: 700; color: #ffffff; }}
 QLabel#brandSub {{ font-size: 12px; color: #d6ece9; }}
 
@@ -97,79 +126,127 @@ QLabel#connPill {{
 QLabel#connDot {{ color: #ffd666; font-size: 13px; }}
 QLabel#connDotOk {{ color: #7cf0b3; font-size: 13px; }}
 
-/* 设备/通用标签 */
+/* ---- 工具条 / 通用标签 ---- */
+QFrame#toolStrip {{ background: transparent; border: none; }}
 QLabel#fieldLabel {{ color: {C_TEXT_SUB}; font-size: 12px; }}
-QLabel#stateTagOk {{ color: {C_OK}; background: #e6f4ea; border-radius: 8px; padding: 2px 8px; font-size: 12px; }}
-QLabel#stateTagErr {{ color: {C_ERR}; background: #fdecea; border-radius: 8px; padding: 2px 8px; font-size: 12px; }}
-QLabel#stateTagCancel {{ color: {C_CANCEL}; background: #fdf3e0; border-radius: 8px; padding: 2px 8px; font-size: 12px; }}
-QLabel#stateTagSkip {{ color: {C_SKIP}; background: #eef0f2; border-radius: 8px; padding: 2px 8px; font-size: 12px; }}
-QLabel#stateTagIdle {{ color: {C_TEXT_SUB}; background: #f0f4f3; border-radius: 8px; padding: 2px 8px; font-size: 12px; }}
-QLabel#stateTagRun {{ color: #ffffff; background: {C_PRIMARY}; border-radius: 8px; padding: 2px 8px; font-size: 12px; }}
+QLabel#stateTagOk {{
+    color: {C_OK}; background: #e3f2e6; border: 1px solid #bfe3c6;
+    border-radius: 9px; padding: 2px 9px; font-size: 12px;
+}}
+QLabel#stateTagErr {{
+    color: {C_ERR}; background: #fbeae7; border: 1px solid #f0c8c2;
+    border-radius: 9px; padding: 2px 9px; font-size: 12px;
+}}
+QLabel#stateTagCancel {{
+    color: {C_CANCEL}; background: #faf1dc; border: 1px solid #ead9ae;
+    border-radius: 9px; padding: 2px 9px; font-size: 12px;
+}}
+QLabel#stateTagSkip {{
+    color: {C_SKIP}; background: #eef1f3; border: 1px solid #d9e0e3;
+    border-radius: 9px; padding: 2px 9px; font-size: 12px;
+}}
+QLabel#stateTagIdle {{
+    color: {C_TEXT_SUB}; background: #eef3f1; border: 1px solid #dde7e4;
+    border-radius: 9px; padding: 2px 9px; font-size: 12px;
+}}
+QLabel#stateTagRun {{
+    color: #ffffff; background: {C_PRIMARY}; border-radius: 9px;
+    padding: 2px 9px; font-size: 12px;
+}}
 QLabel#stateTagReady {{ color: {C_OK}; font-size: 12px; }}
 
-/* 任务行 */
-QFrame#taskRow {{ background: #fbfdfc; border: 1px solid #edf2f0; border-radius: 8px; }}
+/* ---- 任务行（紧凑单行：勾选 + 标题 + 状态标签） ---- */
+QFrame#taskRow {{
+    background: rgba(255,255,255,0.55); border: 1px solid #e3ece9;
+    border-radius: 9px;
+}}
 QFrame#taskRow:hover {{ border: 1px solid {C_PRIMARY}; }}
-QCheckBox#taskCheck {{ font-size: 13px; spacing: 6px; }}
+QCheckBox#taskCheck {{ font-size: 13px; spacing: 7px; }}
 QCheckBox#taskCheck::indicator {{
-    width: 16px; height: 16px; border: 1px solid #b9c7c3; border-radius: 4px;
-    background: #ffffff;
+    width: 16px; height: 16px; border: 1px solid #a9bdb7; border-radius: 4px;
+    background: {C_CARD_SOLID};
 }}
 QCheckBox#taskCheck::indicator:checked {{
-    background: {C_PRIMARY}; border: 1px solid {C_PRIMARY};
-    image: none;
+    background: {C_PRIMARY}; border: 1px solid {C_PRIMARY}; image: none;
 }}
 QCheckBox#taskCheck::indicator:disabled {{ background: #eef0ef; border-color: #d7dddb; }}
-QLabel#taskDesc {{ color: {C_TEXT_SUB}; font-size: 12px; }}
 
-/* 按钮层级 */
+/* ---- 按钮层级 ---- */
 QPushButton {{
-    background: #ffffff; color: {C_TEXT}; border: 1px solid {C_BORDER};
-    border-radius: 6px; padding: 6px 14px; min-height: 18px;
+    background: rgba(255,255,255,0.9); color: {C_TEXT};
+    border: 1px solid {C_BORDER}; border-radius: 7px;
+    padding: 6px 14px; min-height: 18px;
 }}
 QPushButton:hover {{ border: 1px solid {C_PRIMARY}; color: {C_PRIMARY}; }}
-QPushButton:disabled {{ color: #a8b3b0; background: #f2f5f4; border: 1px solid #e7ecea; }}
+QPushButton:disabled {{ color: #9aa8a4; background: #eef2f1; border: 1px solid #e2e9e7; }}
 QPushButton#primary {{
     background: {C_PRIMARY}; color: #ffffff; border: none; font-weight: 600;
     padding: 8px 22px;
 }}
-QPushButton#primary:hover {{ background: {C_PRIMARY_HOVER}; }}
-QPushButton#primary:disabled {{ background: {C_PRIMARY_DISABLED}; color: #eaf6f4; }}
-QPushButton#danger {{ color: {C_ERR}; border: 1px solid #f0c6c2; }}
+QPushButton#primary:hover {{ background: {C_PRIMARY_HOVER}; color: #ffffff; }}
+QPushButton#primary:disabled {{
+    background: {C_PRIMARY_DISABLED}; color: #e6f3f1; border: none;
+}}
+QPushButton#danger {{ color: {C_ERR}; border: 1px solid #efc3bd; }}
 QPushButton#danger:hover {{ background: #fdf0ef; border: 1px solid {C_ERR}; }}
 QPushButton#ghost {{ border: none; background: transparent; color: {C_TEXT_SUB}; }}
 QPushButton#ghost:hover {{ color: {C_PRIMARY}; }}
-QPushButton#link {{ border: none; background: transparent; color: {C_PRIMARY}; }}
-QPushButton#link:hover {{ text-decoration: underline; }}
+QPushButton#link {{ border: none; background: transparent; color: {C_PRIMARY}; padding: 4px 8px; }}
+QPushButton#link:hover {{ text-decoration: underline; color: {C_PRIMARY_HOVER}; }}
+QPushButton#menuBtn {{
+    background: rgba(255,255,255,0.85); border: 1px solid {C_BORDER};
+    border-radius: 7px; padding: 5px 10px; color: {C_TEXT};
+}}
+QPushButton#menuBtn:hover {{ border: 1px solid {C_PRIMARY}; color: {C_PRIMARY}; }}
+QPushButton::menu-indicator {{ subcontrol-position: right center; right: 4px; }}
 
 QComboBox, QLineEdit {{
-    background: #ffffff; border: 1px solid {C_BORDER}; border-radius: 6px;
-    padding: 5px 10px;
+    background: rgba(255,255,255,0.95); border: 1px solid {C_BORDER};
+    border-radius: 7px; padding: 5px 10px;
 }}
 QComboBox:focus, QLineEdit:focus {{ border: 1px solid {C_PRIMARY}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
 
+/* ---- 菜单（毛玻璃弹层） ---- */
+QMenu {{
+    background: rgba(255,255,255,0.96); border: 1px solid #d8e4e1;
+    border-radius: 8px; padding: 6px;
+}}
+QMenu::item {{
+    padding: 6px 24px 6px 12px; border-radius: 6px; color: {C_TEXT};
+    font-size: 13px;
+}}
+QMenu::item:selected {{ background: #e0f1ee; color: {C_PRIMARY}; }}
+QMenu::item:disabled {{ color: #a3afac; }}
+QMenu::separator {{ height: 1px; background: #e5ecea; margin: 5px 8px; }}
+
+/* ---- 滚动区（任务主体） ---- */
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QScrollBar:vertical {{
     background: transparent; width: 10px; margin: 2px;
 }}
-QScrollBar::handle:vertical {{ background: #c9d4d1; border-radius: 5px; min-height: 24px; }}
-QScrollBar::handle:vertical:hover {{ background: #a9bcb8; }}
+QScrollBar::handle:vertical {{ background: #b9c9c5; border-radius: 5px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: #96b0ab; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; }}
-QScrollBar::handle:horizontal {{ background: #c9d4d1; border-radius: 5px; min-width: 24px; }}
+QScrollBar::handle:horizontal {{ background: #b9c9c5; border-radius: 5px; min-width: 24px; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
 QCheckBox#logOpt {{ font-size: 12px; color: {C_TEXT_SUB}; spacing: 5px; }}
 QCheckBox#logOpt::indicator {{
-    width: 14px; height: 14px; border: 1px solid #b9c7c3; border-radius: 3px; background: #ffffff;
+    width: 14px; height: 14px; border: 1px solid #a9bdb7; border-radius: 3px;
+    background: {C_CARD_SOLID};
 }}
 QCheckBox#logOpt::indicator:checked {{ background: {C_PRIMARY}; border-color: {C_PRIMARY}; }}
 
-/* 日志（深色等宽） */
+/* ---- 日志（折叠状态条 + 深色展开面板） ---- */
+QLabel#logSummary {{
+    color: {C_TEXT_SUB}; font-size: 12px; background: transparent;
+    padding: 0 6px;
+}}
 QPlainTextEdit#logView {{
-    background: #12211f; color: #d7e6e2; border: none; border-radius: 8px;
+    background: #14211f; color: #d9e8e4; border: none; border-radius: 9px;
     font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
     font-size: 12px; padding: 6px;
 }}
@@ -177,15 +254,16 @@ QLabel#statusPill {{
     background: {C_PRIMARY}; color: #ffffff; border-radius: 9px;
     padding: 3px 12px; font-size: 12px; font-weight: 600;
 }}
-QLabel#statusPillIdle {{ background: #dbe5e2; color: {C_TEXT_SUB}; }}
-QLabel#statusPillStop {{ background: #f3d9c4; color: #8a4b12; }}
+QLabel#statusPillIdle {{ background: #dce7e4; color: {C_TEXT_SUB}; }}
+QLabel#statusPillStop {{ background: #f3ddc6; color: #7c4510; }}
 QProgressBar {{
-    background: #e7eeec; border: none; border-radius: 4px; height: 8px; text-align: center;
+    background: #e2ebe9; border: none; border-radius: 4px; height: 8px;
+    text-align: center;
 }}
 QProgressBar::chunk {{ background: {C_PRIMARY}; border-radius: 4px; }}
 
-QHeaderView::section, QTableWidget {{ background: #ffffff; }}
-QDialog {{ background: {C_BG}; }}
+QHeaderView::section, QTableWidget {{ background: {C_CARD_SOLID}; }}
+QDialog {{ background: {C_BG_TOP}; }}
 QDialog QLabel#aboutText {{ color: {C_TEXT_SUB}; font-size: 12px; }}
 """
 
@@ -267,7 +345,7 @@ def _rounded_pixmap(path: str, size: int) -> QtGui.QPixmap:
 
 
 class Card(QtWidgets.QFrame):
-    """圆角浅色卡片：可选标题 + 简短说明 + 内容区。"""
+    """圆角浅色毛玻璃卡片：可选标题 + 简短说明 + 内容区。"""
 
     def __init__(self, title: str = "", hint: str = "",
                  parent: Optional[QtWidgets.QWidget] = None):
@@ -301,40 +379,33 @@ class Card(QtWidgets.QFrame):
 
 
 class TaskRow(QtWidgets.QFrame):
-    """单个任务的勾选行：状态标签 + 标题 + 描述。"""
+    """单个任务的紧凑单行：勾选（标题）+ 状态标签；描述进 tooltip。"""
 
     def __init__(self, task: dict, on_toggle, parent=None):
         super().__init__(parent)
         self.setObjectName("taskRow")
-        # 任务描述可能换行；让行高始终跟随内容，避免在滚动容器里挤到下一行。
+        # 单行任务行：行高固定紧凑，由滚动容器统一管理，避免占用多行。
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                           QtWidgets.QSizePolicy.Policy.Minimum)
+                           QtWidgets.QSizePolicy.Policy.Fixed)
         self.task = task
         self._status = "idle"   # idle/ready/running/success/failed/cancelled/skipped
-        outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(10, 6, 10, 6)
-        outer.setSpacing(2)
-
-        top = QtWidgets.QHBoxLayout()
-        top.setSpacing(8)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(12, 5, 10, 5)
+        lay.setSpacing(8)
         self.check = QtWidgets.QCheckBox(task["title"])
         self.check.setObjectName("taskCheck")
-        self.check.setToolTip(task.get("description", ""))
+        desc = task.get("description", "")
+        if desc:
+            # 描述不再常驻占行：作为 tooltip 提供，标题处可悬停查看
+            self.check.setToolTip(desc)
+            self.setToolTip(desc)
         self.check.toggled.connect(lambda on, t=task: on_toggle(t, on))
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setObjectName("stateTagIdle")
         self.status_label.setVisible(False)
-        top.addWidget(self.check)
-        top.addStretch(1)
-        top.addWidget(self.status_label)
-        outer.addLayout(top)
-
-        desc = QtWidgets.QLabel(task.get("description", ""))
-        desc.setObjectName("taskDesc")
-        desc.setWordWrap(True)
-        desc.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                           QtWidgets.QSizePolicy.Policy.Minimum)
-        outer.addWidget(desc)
+        lay.addWidget(self.check)
+        lay.addStretch(1)
+        lay.addWidget(self.status_label)
 
     def set_runnable(self, runnable: bool, reason: str = "") -> None:
         self.check.setEnabled(runnable)
@@ -410,6 +481,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._all_lines: list = []
         self._log_auto_scroll = True
         self._log_errors_only = False
+        self._log_expanded = False
         self._run_started_at = 0.0
         self._current_title = ""
         self._task_index = 0
@@ -432,7 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         central.setObjectName("root")
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(12)
+        root.setSpacing(10)
         self.setCentralWidget(central)
         self.setStyleSheet(QSS)
 
@@ -443,22 +515,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # ---- 品牌条 ----
         self._build_brand_bar(root)
 
-        # ---- 设备卡片 ----
-        self._build_device_card(root)
+        # ---- 顶部工具条：设备（一级）+ 设备▾ / 维护与更新▾（二级） ----
+        self._build_tool_strip(root)
 
-        # ---- 运行组件卡片（轻量版：缺失时提示下载） ----
-        self._build_runtime_card(root)
+        # ---- 任务卡片（窗口弹性主体：滚动区 + 底部工具栏结构分离） ----
+        self._build_task_card(root, stretch=1)
 
-        # ---- 上游脚本版本卡片 ----
-        self._build_version_card(root)
-
-        # ---- 任务卡片（滚动） ----
-        self._build_task_card(root)
-
-        # ---- 运行控制 ----
+        # ---- 运行控制条 ----
         self._build_control_card(root)
 
-        # ---- 日志卡片 ----
+        # ---- 日志卡片（默认折叠为状态条） ----
         self._build_log_card(root)
 
         self.statusBar().showMessage("就绪")
@@ -468,28 +534,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setFont(base_font)
         self._populate_tasks()
         self._refresh_version()
-        # 后台检测运行组件（不阻塞首屏）
+        # 后台检测运行组件（不阻塞首屏），结果只写日志/状态条与缺件提示
         QtCore.QTimer.singleShot(300, lambda: self._refresh_runtime_status())
 
     def _build_brand_bar(self, root: QtWidgets.QVBoxLayout) -> None:
         bar = QtWidgets.QFrame()
         bar.setObjectName("brandBar")
         lay = QtWidgets.QHBoxLayout(bar)
-        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setContentsMargins(18, 12, 14, 12)
         lay.setSpacing(14)
         png = constants.logo_png_path()
         icon_label = QtWidgets.QLabel()
-        icon_label.setFixedSize(52, 52)
+        icon_label.setFixedSize(44, 44)
         if png:
-            pm = _rounded_pixmap(png, 52)
+            pm = _rounded_pixmap(png, 44)
             if not pm.isNull():
                 icon_label.setPixmap(pm)
         lay.addWidget(icon_label)
         text_col = QtWidgets.QVBoxLayout()
-        text_col.setSpacing(2)
+        text_col.setSpacing(1)
         name = QtWidgets.QLabel("Coin11 助手")
         name.setObjectName("brandName")
-        sub = QtWidgets.QLabel("淘宝 / 闲鱼 / 支付宝 日常任务 · 完整运行时离线版")
+        sub = QtWidgets.QLabel("淘宝 / 闲鱼 / 支付宝 日常任务 · 单页运行台")
         sub.setObjectName("brandSub")
         text_col.addWidget(name)
         text_col.addWidget(sub)
@@ -511,6 +577,84 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(bar)
         self._set_connection_pill("检测中", ok=False)
 
+    def _build_tool_strip(self, root: QtWidgets.QVBoxLayout) -> None:
+        """一级：设备下拉 + 刷新；二级：设备▾ / 维护与更新▾ 两个菜单按钮。"""
+        strip = QtWidgets.QFrame()
+        strip.setObjectName("toolStrip")
+        row = QtWidgets.QHBoxLayout(strip)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(8)
+        lab = QtWidgets.QLabel("目标设备")
+        lab.setObjectName("fieldLabel")
+        row.addWidget(lab)
+        self.device_combo = QtWidgets.QComboBox()
+        self.device_combo.setMinimumWidth(280)
+        self.device_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        self.refresh_btn = QtWidgets.QPushButton("刷新")
+        self.refresh_btn.setToolTip("重新检测已连接设备")
+        self.refresh_btn.clicked.connect(
+            lambda: self._refresh_device_state())
+        row.addWidget(self.device_combo, 1)
+        row.addWidget(self.refresh_btn)
+
+        # 缺运行组件时的轻提示（常驻大卡已移除，改为主干行内小提示）
+        self.runtime_hint = QtWidgets.QLabel("")
+        self.runtime_hint.setVisible(False)
+        row.addSpacing(6)
+        row.addWidget(self.runtime_hint)
+
+        row.addStretch(1)
+        self._build_device_menu_button(row)
+        self._build_maintain_menu_button(row)
+        root.addWidget(strip)
+
+    def _build_device_menu_button(self, row: QtWidgets.QHBoxLayout) -> None:
+        """设备 ▾ 二级菜单：重新接管 ADB / 设备连接说明。"""
+        self.device_menu_btn = QtWidgets.QPushButton("设备")
+        self.device_menu_btn.setObjectName("menuBtn")
+        menu = QtWidgets.QMenu(self.device_menu_btn)
+        act_refresh = menu.addAction("刷新设备")
+        act_refresh.triggered.connect(lambda: self._refresh_device_state())
+        act_takeover = menu.addAction("重新接管 ADB")
+        act_takeover.triggered.connect(self._on_takeover_adb)
+        act_help = menu.addAction("设备连接说明")
+        act_help.triggered.connect(self._on_device_help)
+        self.device_menu_btn.setMenu(menu)
+        self.device_menu_btn.setToolTip("刷新设备 / 重新接管 ADB / 设备连接说明")
+        row.addWidget(self.device_menu_btn)
+
+    def _build_maintain_menu_button(self, row: QtWidgets.QHBoxLayout) -> None:
+        """维护与更新 ▾：原“运行组件”与“上游脚本版本”两卡的菜单化。"""
+        self.maintain_menu_btn = QtWidgets.QPushButton("维护与更新")
+        self.maintain_menu_btn.setObjectName("menuBtn")
+        menu = QtWidgets.QMenu(self.maintain_menu_btn)
+
+        act_download = menu.addAction("下载中心")
+        act_download.setToolTip("下载 / 安装 / 修复任务运行必需组件")
+        act_download.triggered.connect(self._on_open_download_center)
+        act_check = menu.addAction("重新检测组件")
+        act_check.triggered.connect(self._on_refresh_runtime_status)
+        act_runtime_dir = menu.addAction("运行时目录…")
+        act_runtime_dir.triggered.connect(self._on_show_runtime_dir)
+        menu.addSeparator()
+        self.sync_action = menu.addAction("同步最新脚本")
+        self.sync_action.triggered.connect(self._on_sync)
+        self.restore_action = menu.addAction("恢复上一版")
+        self.restore_action.triggered.connect(self._on_restore)
+        menu.addSeparator()
+        act_open_log = menu.addAction("打开日志目录")
+        act_open_log.triggered.connect(self._on_open_log_dir)
+        act_copy = menu.addAction("复制诊断文本")
+        act_copy.triggered.connect(self._on_copy_diag)
+        self.maintain_menu = menu
+        self.maintain_menu_btn.setMenu(menu)
+        self.maintain_menu_btn.setToolTip(
+            "下载中心 / 重新检测组件 / 运行时目录 / 同步最新脚本 / "
+            "恢复上一版 / 打开日志目录 / 复制诊断文本")
+        row.addWidget(self.maintain_menu_btn)
+
     def _set_connection_pill(self, text: str, ok: bool = True) -> None:
         self.conn_dot.setText("●")
         self.conn_dot.setObjectName("connDotOk" if ok else "connDot")
@@ -519,151 +663,48 @@ class MainWindow(QtWidgets.QMainWindow):
         style.polish(self.conn_dot)
         self.conn_pill.setText(text)
 
-    def _make_device_card(self, card: Card) -> None:
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(10)
-        lab = QtWidgets.QLabel("目标设备")
-        lab.setObjectName("fieldLabel")
-        self.device_combo = QtWidgets.QComboBox()
-        self.device_combo.setMinimumWidth(300)
-        self.device_combo.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
-        self.refresh_btn = QtWidgets.QPushButton("刷新设备")
-        self.takeover_btn = QtWidgets.QPushButton("重新接管 ADB")
-        self.refresh_btn.clicked.connect(
-            lambda: self._refresh_device_state())
-        self.takeover_btn.clicked.connect(self._on_takeover_adb)
-        row.addWidget(lab)
-        row.addWidget(self.device_combo, 1)
-        row.addWidget(self.refresh_btn)
-        row.addWidget(self.takeover_btn)
-        card.add_layout(row)
+    def _build_task_card(self, root: QtWidgets.QVBoxLayout,
+                         stretch: int = 1) -> None:
+        """任务卡片 = 窗口弹性主体。
 
-    def _build_device_card(self, root: QtWidgets.QVBoxLayout) -> None:
-        card = Card("连接与设备",
-                    "选择本次任务要操作的手机；同一时间只运行一个设备、一个任务。")
-        self._make_device_card(card)
-        root.addWidget(card)
-
-    def _build_runtime_card(self, root: QtWidgets.QVBoxLayout) -> None:
-        """运行组件状态卡片：轻量版在缺失时提示下载入口，任务前拦截。"""
-        self.runtime_card = Card(
-            "运行组件",
-            "任务脚本需要内置的 Python 运行时与依赖组件；缺失时任务不会启动，"
-            "请先到“下载中心”下载必需组件。")
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(10)
-        self.runtime_status_label = QtWidgets.QLabel("检测中…")
-        self.runtime_status_label.setObjectName("stateTagIdle")
-        self.runtime_dir_label = QtWidgets.QLabel("")
-        self.runtime_dir_label.setObjectName("fieldLabel")
-        self.runtime_dir_label.setWordWrap(True)
-        self.open_download_btn = QtWidgets.QPushButton("下载中心")
-        self.open_download_btn.setObjectName("primary")
-        self.runtime_refresh_btn = QtWidgets.QPushButton("重新检测")
-        self.open_download_btn.clicked.connect(self._on_open_download_center)
-        self.runtime_refresh_btn.clicked.connect(
-            self._on_refresh_runtime_status)
-        row.addWidget(self.runtime_status_label)
-        row.addWidget(self.runtime_dir_label, 1)
-        row.addWidget(self.runtime_refresh_btn)
-        row.addWidget(self.open_download_btn)
-        self.runtime_card.add_layout(row)
-        root.addWidget(self.runtime_card)
-        # 初始状态（延迟到首个 timer tick 后台检测，避免启动卡顿）
-
-    def _runtime_dir_label_text(self) -> str:
-        rt = resolve_data_runtime_dir(self.settings)
-        return f"目录：{rt}"
-
-    def _on_refresh_runtime_status(self):
-        self._refresh_runtime_status()
-
-    def _refresh_runtime_status(self, background: bool = True):
-        """后台线程全量检测运行组件；UI 状态回到 GUI 线程。"""
-        self.runtime_status_label.setText("检测中…")
-        self.runtime_status_label.setObjectName("stateTagIdle")
-        rt_dir = resolve_data_runtime_dir(self.settings)
-
-        def _do():
-            ok, message, missing = ensure_runtime_ready(rt_dir)
-            self._on_ui(lambda: self._apply_runtime_status(ok, message, missing))
-
-        if background:
-            threading.Thread(target=_do, daemon=True).start()
-        else:
-            _do()
-
-    def _apply_runtime_status(self, ok: bool, message: str, missing: list):
-        self.runtime_dir_label.setText(self._runtime_dir_label_text())
-        self.runtime_status_label.setText("运行组件就绪" if ok else "缺少运行组件")
-        self.runtime_status_label.setObjectName(
-            "stateTagOk" if ok else "stateTagErr")
-        style = self.runtime_status_label.style()
-        style.unpolish(self.runtime_status_label)
-        style.polish(self.runtime_status_label)
-        self._runtime_ready = ok
-        self._runtime_missing = list(missing)
-        # 缺组件时任务仍可勾选，但开始运行会被拦截并引导下载中心
-        self._log_line(f"[运行时] {message}")
-
-    def _on_open_download_center(self):
-        if getattr(self, "_running", False):
-            QtWidgets.QMessageBox.information(
-                self, "正在运行", "任务运行中请先停止，再打开下载中心。")
-            return
-        dlg = RuntimeDownloadDialog(self.settings, parent=self)
-        dlg.exec()
-        self._refresh_runtime_status()
-
-    def _build_version_card(self, root: QtWidgets.QVBoxLayout) -> None:
-        card = Card("上游脚本版本",
-                    "脚本保存在用户数据目录，可一键同步最新或回退上一版（失败保持当前可用版本）。")
-        row = QtWidgets.QHBoxLayout()
-        self.version_label = QtWidgets.QLabel("读取中…")
-        self.version_label.setWordWrap(True)
-        self.sync_btn = QtWidgets.QPushButton("同步最新脚本")
-        self.restore_btn = QtWidgets.QPushButton("恢复上一脚本版本")
-        self.sync_btn.clicked.connect(self._on_sync)
-        self.restore_btn.clicked.connect(self._on_restore)
-        row.addWidget(self.version_label, 1)
-        row.addWidget(self.sync_btn)
-        row.addWidget(self.restore_btn)
-        card.add_layout(row)
-        root.addWidget(card)
-
-    def _build_task_card(self, root: QtWidgets.QVBoxLayout) -> None:
+        布局层次（P1 修复）：滚动区（占位 1，弹性）与底部工具栏（固定）作为
+        卡片 body 中两个顺序独立的条目，工具栏绝不会进入滚动容器，也不会被
+        滚动内容顶出视口；二者不与运行控制/日志条重叠。
+        """
         self.task_card = Card(
             "任务清单",
-            "勾选要运行的任务（按列表顺序执行）。限时活动默认折叠：页面可能已改版/过期，"
-            "运行前会再次确认。")
-        # 滚动容器
+            "勾选要运行的任务（按列表顺序执行）；限时活动默认折叠，运行前会再确认。")
+        # 滚动容器（任务区弹性主体）
         scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("taskScroll")
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setMinimumHeight(230)
-        scroll.setMaximumHeight(360)
+        scroll.setMinimumHeight(90)
         scroll.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                              QtWidgets.QSizePolicy.Policy.Expanding)
         inner = QtWidgets.QWidget()
+        inner.setObjectName("taskScrollInner")
         inner.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                            QtWidgets.QSizePolicy.Policy.Minimum)
+                            QtWidgets.QSizePolicy.Policy.Expanding)
         self.tasks_layout = QtWidgets.QVBoxLayout(inner)
-        self.tasks_layout.setContentsMargins(2, 2, 2, 2)
-        self.tasks_layout.setSpacing(6)
-        # 关键：滚动区的内容按子项实际高度计算最小尺寸，超出视口时由滚动条接管。
-        # 否则 QScrollArea 会把后续任务排到视口外，与下面的操作栏发生重叠。
-        self.tasks_layout.setSizeConstraint(
-            QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        self.tasks_layout.setContentsMargins(2, 2, 6, 2)
+        self.tasks_layout.setSpacing(5)
+        # 关键：widgetResizable + 内容自然高度。绝不设置会把内容排到视口外
+        # 的 sizeHint 覆盖；超出由滚动条接管，工具栏在滚动容器之外。
         scroll.setWidget(inner)
-        self.task_card.add(scroll)
+        self.task_card.body.addWidget(scroll, 1)   # 弹性主体：优先伸缩
+        self.task_scroll = scroll
 
-        sel_row = QtWidgets.QHBoxLayout()
+        # 底部工具栏：与滚动区同一卡片、但为独立 layout 层级（固定不滚动）
+        self.task_toolbar = QtWidgets.QFrame()
+        self.task_toolbar.setObjectName("toolStrip")
+        sel_row = QtWidgets.QHBoxLayout(self.task_toolbar)
+        sel_row.setContentsMargins(0, 4, 0, 0)
+        sel_row.setSpacing(6)
         self.select_all_btn = QtWidgets.QPushButton("全选日常任务")
         self.clear_all_btn = QtWidgets.QPushButton("取消选择")
         self.expand_limited_btn = QtWidgets.QPushButton("显示限时活动 ▾")
@@ -677,11 +718,11 @@ class MainWindow(QtWidgets.QMainWindow):
         sel_row.addWidget(self.clear_all_btn)
         sel_row.addStretch(1)
         sel_row.addWidget(self.expand_limited_btn)
-        self.task_card.add_layout(sel_row)
-        root.addWidget(self.task_card, 3)
+        self.task_card.body.addWidget(self.task_toolbar)   # 结构上独立于滚动区
+        root.addWidget(self.task_card, stretch)
 
     def _build_control_card(self, root: QtWidgets.QVBoxLayout) -> None:
-        card = Card("运行控制")
+        card = Card()
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(12)
         self.run_btn = QtWidgets.QPushButton("开始运行")
@@ -702,7 +743,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setFixedWidth(180)
+        self.progress.setFixedWidth(160)
         row.addWidget(self.run_btn)
         row.addWidget(self.stop_btn)
         row.addSpacing(6)
@@ -711,15 +752,41 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.run_state_label)
         row.addStretch(1)
         row.addWidget(self.elapsed_label)
+        row.addSpacing(6)
         row.addWidget(self.progress_text)
         row.addWidget(self.progress)
         card.add_layout(row)
+        self.control_card = card
         root.addWidget(card)
 
     def _build_log_card(self, root: QtWidgets.QVBoxLayout) -> None:
-        card = Card("实时日志",
-                    "脚本输出逐行实时显示（不等任务结束）；可用“仅看错误”过滤与自动滚动。")
-        bar = QtWidgets.QHBoxLayout()
+        """实时日志卡：默认折叠为简短状态条，展开后显示完整实时日志与操作。"""
+        card = Card()
+        self.log_card = card
+        # 头部：标题 + 折叠状态条 + 展开/收起
+        header = QtWidgets.QHBoxLayout()
+        header.setSpacing(8)
+        title = QtWidgets.QLabel("实时日志")
+        title.setObjectName("cardTitle")
+        self.log_summary = QtWidgets.QLabel("尚未产生日志")
+        self.log_summary.setObjectName("logSummary")
+        self.log_summary.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                       QtWidgets.QSizePolicy.Policy.Preferred)
+        self.log_toggle_btn = QtWidgets.QPushButton("展开日志")
+        self.log_toggle_btn.setObjectName("link")
+        self.log_toggle_btn.setToolTip("展开查看完整实时日志（自动滚动 / "
+                                       "仅看错误 / 复制 / 打开目录）")
+        self.log_toggle_btn.clicked.connect(self._toggle_log_expanded)
+        header.addWidget(title)
+        header.addWidget(self.log_summary, 1)
+        header.addWidget(self.log_toggle_btn)
+        card.add_layout(header)
+
+        # 展开态：选项行（自动滚动 / 仅看错误 / 复制 / 打开目录）
+        self.log_opts = QtWidgets.QWidget()
+        bar = QtWidgets.QHBoxLayout(self.log_opts)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(6)
         self.auto_scroll_check = QtWidgets.QCheckBox("自动滚动")
         self.auto_scroll_check.setObjectName("logOpt")
         self.auto_scroll_check.setChecked(True)
@@ -728,24 +795,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.errors_only_check = QtWidgets.QCheckBox("仅看错误")
         self.errors_only_check.setObjectName("logOpt")
         self.errors_only_check.toggled.connect(self._toggle_errors_only)
-        self.open_log_btn = QtWidgets.QPushButton("打开日志目录")
         self.copy_btn = QtWidgets.QPushButton("复制诊断文本")
-        self.open_log_btn.setObjectName("link")
+        self.open_log_btn = QtWidgets.QPushButton("打开日志目录")
         self.copy_btn.setObjectName("link")
-        self.open_log_btn.clicked.connect(self._on_open_log_dir)
+        self.open_log_btn.setObjectName("link")
         self.copy_btn.clicked.connect(self._on_copy_diag)
+        self.open_log_btn.clicked.connect(self._on_open_log_dir)
         bar.addWidget(self.auto_scroll_check)
         bar.addWidget(self.errors_only_check)
         bar.addStretch(1)
         bar.addWidget(self.copy_btn)
         bar.addWidget(self.open_log_btn)
-        card.add_layout(bar)
+        self.log_opts.setVisible(False)
+        card.add(self.log_opts)
+
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(4000)
+        self.log_view.setMinimumHeight(80)
+        self.log_view.setMaximumHeight(260)
+        self.log_view.setVisible(False)
         card.add(self.log_view)
-        root.addWidget(card, 4)
+        root.addWidget(card)
+        self._set_log_expanded(False)
+
+    # ------------------------------------------------------- 日志折叠
+    def _toggle_log_expanded(self):
+        self._set_log_expanded(not self._log_expanded)
+
+    def _set_log_expanded(self, expanded: bool):
+        self._log_expanded = bool(expanded)
+        self.log_opts.setVisible(expanded)
+        self.log_view.setVisible(expanded)
+        self.log_summary.setVisible(not expanded)
+        self.log_toggle_btn.setText("收起日志" if expanded else "展开日志")
+        if expanded and self._log_auto_scroll:
+            sb = self.log_view.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
     # ------------------------------------------------------------- 任务列表
     def _clear_task_containers(self):
@@ -780,8 +867,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clear_task_containers()
         last_ids = set(self.settings.last_task_ids)
 
-        # 日常任务组（直接放主布局，默认可见）
-        self._add_section_label(self.tasks_layout, "日常任务（默认展示）")
+        # 日常任务组（直接放主滚动布局，默认可见）
+        self._add_section_label(self.tasks_layout, "日常任务")
         self._daily_rows = []
         for task in self.catalog.daily_tasks():
             row = self._add_task_row(task, self.tasks_layout)
@@ -799,7 +886,7 @@ class MainWindow(QtWidgets.QMainWindow):
         holder = QtWidgets.QWidget()
         hlay = QtWidgets.QVBoxLayout(holder)
         hlay.setContentsMargins(0, 0, 0, 0)
-        hlay.setSpacing(6)
+        hlay.setSpacing(5)
         self._add_section_label(hlay, "限时活动（可能已过期，页面可能已变更）")
         self._limited_rows = []
         for task in self.catalog.limited_tasks():
@@ -816,7 +903,6 @@ class MainWindow(QtWidgets.QMainWindow):
         holder.setVisible(False)
         self._limited_holder = holder
         self.tasks_layout.addWidget(holder)
-        self.tasks_layout.addStretch(1)
         self.expand_limited_btn.setText("显示限时活动 ▾")
 
     def _toggle_limited(self):
@@ -831,6 +917,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 持久化勾选
         ids = self._selected_task_ids()
         self.settings.set("last_task_ids", ids)
+        self._update_idle_selection()
 
     def _selected_task_ids(self):
         return [tid for tid, row in self._task_rows.items()
@@ -842,6 +929,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if row.enabled:
                 row.check.setChecked(on)
         self.settings.set("last_task_ids", self._selected_task_ids())
+        self._update_idle_selection()
+
+    def _update_idle_selection(self):
+        """空闲时在运行控制行给出任务计数反馈（不改变任何运行语义）。"""
+        if self._running:
+            return
+        n = len(self._selected_task_ids())
+        self.run_state_label.setText(
+            f"未开始 · 已选 {n} 个任务" if n else "未开始 · 请选择任务")
 
     # ------------------------------------------------------------ 设备状态
     def _load_persisted_choice(self):
@@ -913,25 +1009,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log_line(f"[设备] {info.get('message', '')}")
         self._set_busy(self.refresh_btn, False)
 
+    def _set_busy(self, btn: QtWidgets.QPushButton, busy: bool):
+        btn.setEnabled(not busy)
+        btn.setText("检测中…" if busy else "刷新")
+
     def _show_guide_4steps(self, hint: str):
-        """首次无 ADB：给出可操作的四步提示。"""
+        """首次无 ADB：给出可操作的四步提示（写入日志，菜单可弹说明）。"""
         self._log_line("[提示] 未找到内置 ADB 程序。")
         self._log_line("[操作] 请确认发行目录含 platform-tools\\adb.exe，或重新安装本应用。")
         self._log_line("[操作] 若要手动修复：1) 重新安装本应用；"
                        "2) 确认杀毒软件未隔离 adb.exe；"
                        "3) 以管理员身份重新运行一次；4) 重启应用。")
 
+    def _on_device_help(self):
+        """设备 ▾ > 设备连接说明：USB 调试四步 + 常见状态处理。"""
+        QtWidgets.QMessageBox.information(
+            self, "设备连接说明",
+            "1. 手机进入 设置 → 关于手机，连续点击“版本号”7 次开启开发者选项；\n"
+            "2. 回到 设置 → 开发者选项，打开“USB 调试”；\n"
+            "3. 用数据线连接电脑与手机，在手机上允许 USB 调试；\n"
+            "4. 在本应用点“刷新设备”检测。\n\n"
+            "提示：若显示 unauthorized，解锁手机并在授权弹窗勾选“始终允许”，\n"
+            "再点刷新；若 offline，重插数据线并关闭其它占用 ADB 的工具。\n\n"
+            "需要重置 ADB 服务时，请使用 设备 → 重新接管 ADB。")
+
     def _refresh_version(self):
         status = self.update.status()
         cur = status["current_commit"]
         prev = status["previous_commit"]
         if cur:
-            self.version_label.setText(
-                f"本地脚本：{cur[:12]}（更新于 {status['current_updated']}）"
-                + (f"　上一版：{prev[:12]}" if prev else ""))
-        else:
-            self.version_label.setText(
-                "本地脚本：出厂版本（源码/首次启动，显示仓库当前代码）")
+            self._log_line(
+                f"[脚本版本] 当前 {cur[:12]}（更新于 {status['current_updated']}）"
+                + (f"；上一版 {prev[:12]}" if prev else ""))
         self._refresh_tasks()
 
     def _refresh_tasks(self):
@@ -942,11 +1051,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _script_root(self):
         return self.update.current_dir
-
-    def _set_busy(self, btn: QtWidgets.QPushButton, busy: bool):
-        btn.setEnabled(not busy)
-        btn.setText("检测中…" if busy else
-                    ("重新接管 ADB" if btn is self.takeover_btn else "刷新设备"))
 
     # ------------------------------------------------------------ 接管 ADB
     def _on_takeover_adb(self):
@@ -976,14 +1080,84 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._on_ui(self._refresh_device_state)
 
+    # ---------------------------------------------------- 运行组件 / 维护
+    def _on_refresh_runtime_status(self):
+        self._refresh_runtime_status()
+
+    def _refresh_runtime_status(self, background: bool = True):
+        """后台线程全量检测运行组件；UI 状态回到 GUI 线程（不再占用大卡）。"""
+        self.statusBar().showMessage("正在重新检测运行组件…")
+        rt_dir = resolve_data_runtime_dir(self.settings)
+
+        def _do():
+            ok, message, missing = ensure_runtime_ready(rt_dir)
+            self._on_ui(lambda: self._apply_runtime_status(ok, message, missing))
+
+        if background:
+            threading.Thread(target=_do, daemon=True).start()
+        else:
+            _do()
+
+    def _apply_runtime_status(self, ok: bool, message: str, missing: list):
+        self._runtime_ready = ok
+        self._runtime_missing = list(missing)
+        if ok:
+            self.runtime_hint.setText("")
+            self.runtime_hint.setVisible(False)
+            self.statusBar().showMessage("运行组件就绪", 4000)
+        else:
+            self.runtime_hint.setText("⚠ 缺少运行组件")
+            self.runtime_hint.setObjectName("stateTagErr")
+            self.runtime_hint.setToolTip(
+                "任务运行需要内置 Python 运行时与依赖组件。\n"
+                "请打开 维护与更新 ▾ → 下载中心 下载必需组件。")
+            style = self.runtime_hint.style()
+            style.unpolish(self.runtime_hint)
+            style.polish(self.runtime_hint)
+            self.runtime_hint.setVisible(True)
+            self.statusBar().showMessage("缺少运行组件，请到下载中心补齐", 6000)
+        # 缺组件时任务仍可勾选，但开始运行会被拦截并引导下载中心
+        self._log_line(f"[运行时] {message}")
+
+    def _on_show_runtime_dir(self):
+        rt = resolve_data_runtime_dir(self.settings)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("运行时目录")
+        box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        box.setText(
+            "任务脚本运行组件的安装目录（下载中心安装/修复）：\n\n"
+            f"{rt}\n\n"
+            "可在“下载中心 → 更改目录”中调整；程序不在此目录外的位置下载任何组件。")
+        box.addButton("打开目录", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        close_btn = box.addButton("关闭", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not close_btn:
+            os.makedirs(rt, exist_ok=True)
+            try:
+                if sys.platform == "win32":
+                    os.startfile(rt)  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen(["xdg-open", rt])
+            except OSError as exc:
+                self._log_line(f"[错误] 无法打开运行时目录：{exc}")
+
+    def _on_open_download_center(self):
+        if getattr(self, "_running", False):
+            QtWidgets.QMessageBox.information(
+                self, "正在运行", "任务运行中请先停止，再打开下载中心。")
+            return
+        dlg = RuntimeDownloadDialog(self.settings, parent=self)
+        dlg.exec()
+        self._refresh_runtime_status()
+
     # ------------------------------------------------------------ 同步/回退
     def _on_sync(self):
         if self._running:
             QtWidgets.QMessageBox.information(
                 self, "正在运行", "任务运行中不能同步脚本，请先停止。")
             return
-        self.sync_btn.setEnabled(False)
-        self.restore_btn.setEnabled(False)
+        self.sync_action.setEnabled(False)
+        self.restore_action.setEnabled(False)
         threading.Thread(target=self._sync_worker, daemon=True).start()
 
     def _sync_worker(self):
@@ -1000,15 +1174,15 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log_line(f"[错误] 同步失败：{exc}")
         finally:
-            self._on_ui(lambda: (self.sync_btn.setEnabled(True),
-                                 self.restore_btn.setEnabled(True)))
+            self._on_ui(lambda: (self.sync_action.setEnabled(True),
+                                 self.restore_action.setEnabled(True)))
 
     def _on_restore(self):
         if self._running:
             QtWidgets.QMessageBox.information(
                 self, "正在运行", "任务运行中不能回退脚本，请先停止。")
             return
-        self.restore_btn.setEnabled(False)
+        self.restore_action.setEnabled(False)
         threading.Thread(target=self._restore_worker, daemon=True).start()
 
     def _restore_worker(self):
@@ -1024,7 +1198,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log_line(f"[错误] 回退失败：{exc}")
         finally:
-            self._on_ui(lambda: self.restore_btn.setEnabled(True))
+            self._on_ui(lambda: self.restore_action.setEnabled(True))
 
     # ------------------------------------------------------------ 运行控制
     def _on_start_run(self):
@@ -1240,6 +1414,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_pill("idle")
             self.run_state_label.setText("运行结束")
         self.elapsed_label.setText("")
+        self._update_idle_selection()
         self._log_line("[结果] 任务列表执行结束。"
                        "注意：脚本正常结束不代表手机上的真实任务全部成功，"
                        "请以手机界面为准。")
@@ -1282,7 +1457,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._log_errors_only and not is_error_line(text):
             return
         self.log_view.appendPlainText(text)
-        if self._log_auto_scroll:
+        # 折叠态：状态条显示最近一行（截断为单行）
+        flat = " ".join(str(text).splitlines())
+        if len(flat) > 110:
+            flat = flat[:107] + "…"
+        self.log_summary.setText(flat)
+        if self._log_expanded and self._log_auto_scroll:
             sb = self.log_view.verticalScrollBar()
             sb.setValue(sb.maximum())
 

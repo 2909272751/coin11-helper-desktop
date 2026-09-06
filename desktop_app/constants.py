@@ -6,7 +6,7 @@ import sys
 
 APP_DISPLAY_NAME = "Coin11助手"
 APP_NAME = "Coin11Helper"  # %LOCALAPPDATA% 下的数据目录名
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.1"
 
 # 唯一允许的上游同步源（HTTPS）。校验时使用精确字符串比较，不做子串匹配。
 UPSTREAM_REPO_URL = "https://github.com/czl0325/coin11-tb.git"
