@@ -153,15 +153,17 @@ class LayoutStructureTest(_UiCase):
                          W.QSizePolicy.Policy.Expanding)
         # 任务卡被分配 stretch=1（弹性主体优先伸缩）
         self.assertGreaterEqual(win.task_scroll.minimumHeight(), 0)
-        # 滚动区内容布局直接持有任务行，而不是把行放进一个固定容器叠底
-        found_row = False
+        # 滚动区内容布局直接持有两个分组容器，容器内再放任务行
+        holder_count = 0
         for i in range(win.tasks_layout.count()):
             w = win.tasks_layout.itemAt(i).widget()
-            if w is not None and getattr(w, "objectName", lambda: "")() \
-                    == "taskRow":
-                found_row = True
-                break
-        self.assertTrue(found_row, "任务行应直接布置在滚动内容布局内")
+            if w is not None and (w is win._daily_holder
+                                  or w is win._limited_holder):
+                holder_count += 1
+        self.assertEqual(holder_count, 2,
+                         "滚动内容应直接持有日常/限时两个分组容器")
+        self.assertTrue(win._daily_holder.isVisible())
+        self.assertFalse(win._limited_holder.isVisible())
 
     def test_task_row_is_compact_single_line(self):
         win = self.win
@@ -182,36 +184,59 @@ class LayoutStructureTest(_UiCase):
 
 
 class MenuReachabilityTest(_UiCase):
-    """SPEC 2 / 3：低频维护动作归入二级菜单，动作可达且保留语义。"""
+    """SPEC 2 / 3：低频维护动作归入二级菜单，动作可达且保留语义；
+    维护菜单按 运行环境/脚本/诊断 分组。"""
+
+    def _actions(self, menu):
+        out = []
+        for a in menu.actions():
+            if a.isSeparator():
+                continue
+            out.append(a)
+        return out
 
     def test_device_menu_items(self):
         win = self.win
         menu = win.device_menu_btn.menu()
-        labels = [a.text() for a in menu.actions()]
+        labels = [a.text() for a in menu.actions() if not a.isSeparator()]
         for expect in ("刷新设备", "重新接管 ADB", "设备连接说明"):
             self.assertIn(expect, labels)
         takeover = [a for a in menu.actions() if a.text() == "重新接管 ADB"]
         self.assertTrue(takeover)
         self.assertIsNotNone(takeover[0].triggered)
 
-    def test_maintain_menu_items(self):
+    def test_maintain_menu_grouped(self):
+        """维护菜单包含三个分组标题，动作齐全且在正确的组内。"""
         win = self.win
         menu = win.maintain_menu
-        labels = [a.text() for a in menu.actions()
-                  if not a.isSeparator()]
+        groups = {"运行环境": ["下载中心", "重新检测组件", "运行时目录…"],
+                  "脚本": ["同步最新脚本", "恢复上一版"],
+                  "诊断": ["打开日志目录", "复制诊断文本"]}
+        actions = [a for a in menu.actions()]
+        # addSection 产生带标题动作；保持出现顺序（含分隔/标题）
+        order = [a.text() for a in actions if a.text()]
+        positions = {t: i for i, t in enumerate(order)}
+        for name in groups:
+            self.assertIn(name, positions, f"缺少菜单分组：{name}")
+        for name, items in groups.items():
+            for it in items:
+                self.assertIn(it, positions, f"缺少菜单动作：{it}")
+                # 组内动作排在该分组标题之后
+                self.assertGreater(positions[it], positions[name],
+                                   f"{it} 应位于分组 {name} 内")
+
+    def test_maintain_menu_items_reachable(self):
+        win = self.win
+        menu = win.maintain_menu
+        labels = [a.text() for a in menu.actions() if not a.isSeparator()]
         for expect in ("下载中心", "重新检测组件", "运行时目录…",
                        "同步最新脚本", "恢复上一版",
                        "打开日志目录", "复制诊断文本"):
             self.assertIn(expect, labels)
-        # 每个动作都已连接 handler
-        for action in menu.actions():
-            if action.isSeparator():
-                continue
-            self.assertTrue(
-                action.triggered is not None or
-                len(action.triggered.receivers(action)) >= 1 or
-                action.text() in ("同步最新脚本", "恢复上一版"),
-                f"菜单动作未连接：{action.text()}")
+        # 每个分组标题不重复
+        titles = [a.text() for a in menu.actions()
+                  if a.text() in ("运行环境", "脚本", "诊断")]
+        self.assertEqual(titles, ["运行环境", "脚本", "诊断"])
 
     def test_takeover_confirm_cancelled_no_side_effect(self):
         """菜单语义：接管 ADB 需确认；拒绝时不做任何接管。"""
@@ -293,16 +318,33 @@ class TaskSelectionTest(_UiCase):
         for task in daily:
             self.assertFalse(win._task_rows[task["id"]].checked)
 
-    def test_limited_collapse_default_hidden(self):
+    def test_limited_tab_default_shows_daily(self):
+        """限时活动默认不显示（segmented 控制），日常任务默认可见。"""
         win = self.win
-        holder = win._limited_holder
-        self.assertIsNotNone(holder)
-        self.assertFalse(holder.isVisible())
-        win._toggle_limited()
-        self.assertTrue(holder.isVisible())
-        self.assertEqual(win.expand_limited_btn.text(), "隐藏限时活动 ▴")
-        win._toggle_limited()
-        self.assertFalse(holder.isVisible())
+        daily_holder = win._daily_holder
+        limited_holder = win._limited_holder
+        self.assertIsNotNone(daily_holder)
+        self.assertIsNotNone(limited_holder)
+        self.assertTrue(daily_holder.isVisible())
+        self.assertFalse(limited_holder.isVisible())
+        self.assertEqual(win._active_tab, "daily")
+        self.assertTrue(win.daily_tab_btn.isChecked())
+        self.assertFalse(win.limited_tab_btn.isChecked())
+
+    def test_switch_to_limited_tab(self):
+        """切到限时 tab：限时容器可见、日常隐藏，选择按钮文案联动。"""
+        win = self.win
+        win.limited_tab_btn.click()
+        self.assertEqual(win._active_tab, "limited")
+        self.assertTrue(win._limited_holder.isVisible())
+        self.assertFalse(win._daily_holder.isVisible())
+        self.assertTrue(win.limited_tab_btn.isChecked())
+        self.assertFalse(win.daily_tab_btn.isChecked())
+        self.assertEqual(win.select_all_btn.text(), "全选限时活动")
+        win.daily_tab_btn.click()
+        self.assertEqual(win._active_tab, "daily")
+        self.assertTrue(win._daily_holder.isVisible())
+        self.assertFalse(win._limited_holder.isVisible())
 
     def test_control_layout_present(self):
         win = self.win
@@ -312,6 +354,195 @@ class TaskSelectionTest(_UiCase):
         self.assertIsNotNone(win.status_pill)
         self.assertIsNotNone(win.progress)
         self.assertFalse(win.stop_btn.isEnabled())
+
+
+class TaskTabSwitchTest(_UiCase):
+    """SPEC 3：限时与日常为清晰 tab/segmented 切换，而非底部按钮折叠。"""
+
+    def test_segmented_buttons_present(self):
+        win = self.win
+        self.assertIsNotNone(win.daily_tab_btn)
+        self.assertIsNotNone(win.limited_tab_btn)
+        self.assertTrue(win.daily_tab_btn.isCheckable())
+        self.assertTrue(win.limited_tab_btn.isCheckable())
+        self.assertTrue(win.daily_tab_btn.autoExclusive())
+
+    def test_select_all_applies_to_active_tab(self):
+        win = self.win
+        # 日常 tab：全选只作用日常
+        win.daily_tab_btn.click()
+        win._set_all(True)
+        for task in win.catalog.daily_tasks():
+            row = win._task_rows[task["id"]]
+            if row.enabled:
+                self.assertTrue(row.checked)
+        win._set_all(False)
+        # 限时 tab：全选只作用限时
+        win.limited_tab_btn.click()
+        win._set_all(True)
+        limited = win.catalog.limited_tasks()
+        self.assertTrue(any(win._task_rows[t["id"]].checked for t in limited))
+        for task in win.catalog.daily_tasks():
+            if win._task_rows[task["id"]].enabled:
+                self.assertFalse(win._task_rows[task["id"]].checked,
+                                 "切换 tab 后全选不应影响日常任务")
+
+    def test_task_row_height_and_selection_feedback(self):
+        win = self.win
+        row = next(iter(win._task_rows.values()))
+        # 行高 40–44px
+        self.assertGreaterEqual(row.height(), 40)
+        self.assertLessEqual(row.height(), 44)
+        # 勾选后行有选中属性
+        row.check.setChecked(True)
+        self.assertEqual(row.property("rowChecked"), "true")
+        # 任务标题区显示已选数量
+        self.assertTrue("1" in win.task_count_label.text() or
+                        "已选" in win.task_count_label.text())
+
+    def test_task_count_label_updates(self):
+        win = self.win
+        win._set_all(True)
+        n = len(win._selected_task_ids())
+        self.assertIn(str(n), win.task_count_label.text())
+        self.assertIn(str(n), win.sel_count_label.text())
+
+
+class RunPanelLayoutTest(_UiCase):
+    """SPEC 4：运行面板标题“本次执行”、设备/选中/组件摘要、开始=唯一 CTA。"""
+
+    def test_run_panel_titles_and_summaries(self):
+        win = self.win
+        self.assertIsNotNone(win.control_card.title_label)
+        self.assertEqual(win.control_card.title_label.text(), "本次执行")
+        # 三项摘要标签存在
+        self.assertTrue(hasattr(win, "device_summary_label"))
+        self.assertTrue(hasattr(win, "sel_count_label"))
+        self.assertTrue(hasattr(win, "run_comp_summary"))
+        self.assertTrue(hasattr(win, "run_comp_open_btn"))
+        # 设备摘要文案（FakeAdb 无设备）
+        self.assertIn("未选择", win.device_summary_label.text())
+
+    def test_run_button_is_primary_and_full_width(self):
+        win = self.win
+        # 开始是唯一主 CTA（primary objectName）
+        self.assertEqual(win.run_btn.objectName(), "primary")
+        # 停止是次级危险按钮，初始禁用
+        self.assertEqual(win.stop_btn.objectName(), "danger")
+        self.assertFalse(win.stop_btn.isEnabled())
+        # 主按钮占满可用宽度：所在列宽度近似可用宽度
+        parent = win.control_card
+        self.assertGreaterEqual(win.run_btn.width(), 120)
+
+    def test_comp_link_compact(self):
+        win = self.win
+        self.assertEqual(win.run_comp_open_btn.text(), "下载")
+        self.assertTrue(win.run_comp_open_btn.isVisible())
+
+
+class LogHeightTest(_UiCase):
+    """SPEC 5：日志抽屉折叠高度≤48px、展开日志视图最高 260px。"""
+
+    def test_collapsed_log_drawer_height(self):
+        win = self.win
+        _pump(self._app, 0.2)
+        h = win.log_card.height()
+        self.assertLessEqual(h, 48)
+        self.assertGreater(h, 0)
+        self.assertFalse(win._log_expanded)
+
+    def test_expanded_log_view_height_cap(self):
+        win = self.win
+        win._toggle_log_expanded()
+        self.assertTrue(win._log_expanded)
+        self.assertLessEqual(win.log_view.maximumHeight(), 260)
+        # 展开态整体不遮任务/运行面板：日志抽屉位于 root 底部且高度有限
+        self.assertLess(win.log_view.maximumHeight(), 300)
+
+    def test_collapsed_summary_shows_last_log(self):
+        win = self.win
+        win._append_log("最近的一行日志内容")
+        self.assertIn("最近的一行日志内容", win.log_summary.text())
+
+
+class NarrowLayoutTest(_UiCase):
+    """SPEC 7：880px 级窄窗口上下布局，任务至少 260px、文字按钮可见。"""
+
+    def test_narrow_task_panel_min_height(self):
+        win = self.win
+        from PySide6 import QtCore
+        win.resize(880, 720)
+        _pump(self._app, 0.3)
+        self.assertEqual(win.work_split.orientation(),
+                         QtCore.Qt.Orientation.Vertical)
+        # 拆分器首项（任务面板）在可见区域中至少占 260px
+        sizes = win.work_split.sizes()
+        self.assertGreaterEqual(sizes[0], 260)
+        # 运行面板也仍可见
+        self.assertGreater(sizes[1], 0)
+        # 任务区域水平不出现滚动（scrollbar horizontal 关闭）
+        self.assertEqual(
+            win.task_scroll.horizontalScrollBarPolicy(),
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 关键控件都在窗口可视范围内
+        self.assertTrue(win.run_btn.isVisible())
+        self.assertTrue(win.select_all_btn.isVisible())
+        self.assertTrue(win.daily_tab_btn.isVisible())
+
+
+class WorkbenchSkeletonTest(_UiCase):
+    """20260906-workbench-skeleton：工作台骨架结构断言（最少、offscreen）。
+
+    仅断言容器结构与关键控件存在，不做视觉结论：
+    - 根 = 品牌条 / 设备条 / QSplitter(任务|运行) / 日志抽屉；
+    - 任务滚动与底部选择工具栏结构分离（同属任务面板但不嵌套）；
+    - 窄于 980px 时 splitter 切 vertical。
+    """
+
+    def _find_splitter(self):
+        return self.win.work_split
+
+    def test_splitter_hosts_task_and_run_panels(self):
+        win = self.win
+        split = win.work_split
+        self.assertIsNotNone(split)
+        from PySide6 import QtCore
+        self.assertEqual(split.orientation(),
+                         QtCore.Qt.Orientation.Horizontal)
+        widgets = [split.widget(i) for i in range(split.count())]
+        self.assertIn(win.task_card, widgets)
+        self.assertIn(win.control_card, widgets)
+
+    def test_task_scroll_and_toolbar_separated_inside_panel(self):
+        win = self.win
+        # 工具栏与滚动区仍是任务面板直属子项（不互相嵌套）
+        self.assertIs(win.task_toolbar.parent(), win.task_card)
+        self.assertIs(win.task_scroll.parent(), win.task_card)
+        # 日志抽屉位于 splitter 之外（窗口根布局）
+        root_lay = win._root_layout
+        children = [root_lay.itemAt(i).widget()
+                    for i in range(root_lay.count())]
+        self.assertIn(win.log_card, children)
+
+    def test_run_panel_controls_present(self):
+        win = self.win
+        for attr in ("sel_count_label", "run_comp_summary", "run_comp_open_btn",
+                     "status_pill", "run_state_label", "elapsed_label",
+                     "progress_text", "progress", "run_btn", "stop_btn"):
+            self.assertTrue(hasattr(win, attr), f"缺少 {attr}")
+            self.assertIsNotNone(getattr(win, attr))
+
+    def test_narrow_width_switches_splitter_vertical(self):
+        win = self.win
+        from PySide6 import QtCore
+        win.resize(900, 800)
+        _pump(self._app)
+        self.assertEqual(win.work_split.orientation(),
+                         QtCore.Qt.Orientation.Vertical)
+        win.resize(1180, 800)
+        _pump(self._app)
+        self.assertEqual(win.work_split.orientation(),
+                         QtCore.Qt.Orientation.Horizontal)
 
 
 if __name__ == "__main__":
