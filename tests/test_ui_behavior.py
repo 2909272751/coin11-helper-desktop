@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 # 必须先于任何 PySide6 导入设置 offscreen（构造 QApplication 前生效）
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -21,6 +22,7 @@ if _REPO not in sys.path:
 
 from desktop_app import constants  # noqa: E402
 from desktop_app.app import MainWindow  # noqa: E402
+from desktop_app.download_dialog import RuntimeDownloadDialog  # noqa: E402
 from desktop_app.settings_store import SettingsStore  # noqa: E402
 from desktop_app.task_catalog import TaskCatalog  # noqa: E402
 from desktop_app.update_service import UpdateService  # noqa: E402
@@ -184,8 +186,9 @@ class LayoutStructureTest(_UiCase):
 
 
 class MenuReachabilityTest(_UiCase):
-    """SPEC 2 / 3：低频维护动作归入二级菜单，动作可达且保留语义；
-    维护菜单按 运行环境/脚本/诊断 分组。"""
+    """SPEC 1：主界面不再有“维护”下拉入口；维护动作迁入“设置与维护”
+    对话框（运行组件 / 脚本更新 / 诊断），动作可达且保留 handler；
+    “设备”菜单保留在一级工具条。"""
 
     def _actions(self, menu):
         out = []
@@ -205,48 +208,195 @@ class MenuReachabilityTest(_UiCase):
         self.assertTrue(takeover)
         self.assertIsNotNone(takeover[0].triggered)
 
-    def test_maintain_menu_grouped(self):
-        """维护菜单包含三个分组标题，动作齐全且在正确的组内。"""
+    def test_no_maintain_entry_on_main_toolbar(self):
+        """主界面不再有“维护”菜单/按钮，不遗留占位；设备菜单仍在。"""
         win = self.win
-        menu = win.maintain_menu
-        groups = {"运行环境": ["下载中心", "重新检测组件", "运行时目录…"],
-                  "脚本": ["同步最新脚本", "恢复上一版"],
-                  "诊断": ["打开日志目录", "复制诊断文本"]}
-        actions = [a for a in menu.actions()]
-        # addSection 产生带标题动作；保持出现顺序（含分隔/标题）
-        order = [a.text() for a in actions if a.text()]
-        positions = {t: i for i, t in enumerate(order)}
-        for name in groups:
-            self.assertIn(name, positions, f"缺少菜单分组：{name}")
-        for name, items in groups.items():
-            for it in items:
-                self.assertIn(it, positions, f"缺少菜单动作：{it}")
-                # 组内动作排在该分组标题之后
-                self.assertGreater(positions[it], positions[name],
-                                   f"{it} 应位于分组 {name} 内")
+        self.assertFalse(hasattr(win, "maintain_menu_btn"),
+                         "不应再存在维护下拉按钮")
+        self.assertFalse(hasattr(win, "maintain_menu"),
+                         "不应再存在维护菜单")
+        from PySide6 import QtWidgets as W
+        texts = [b.text() for b in win.findChildren(W.QPushButton)]
+        self.assertNotIn("维护", texts)
+        self.assertIn("设备", texts)   # 设备菜单保留
+        self.assertTrue(hasattr(win, "device_menu_btn"))
 
-    def test_maintain_menu_items_reachable(self):
+    def _open_settings_dialog(self):
+        """以 stub exec 打开“设置与维护”对话框（不进入模态循环）。"""
+        from PySide6 import QtWidgets as W
+        with mock.patch.object(W.QDialog, "exec", return_value=0):
+            self.win._show_settings()
+        dlg = getattr(self.win, "_setting_dialog", None)
+        self.assertIsNotNone(dlg, "设置对话框未保留引用")
+        return dlg
+
+    def test_settings_dialog_has_grouped_maintenance(self):
+        """设置与维护对话框含 运行组件/脚本更新/诊断 三组与全部动作。"""
         win = self.win
-        menu = win.maintain_menu
-        labels = [a.text() for a in menu.actions() if not a.isSeparator()]
-        for expect in ("下载中心", "重新检测组件", "运行时目录…",
-                       "同步最新脚本", "恢复上一版",
-                       "打开日志目录", "复制诊断文本"):
-            self.assertIn(expect, labels)
-        # 每个分组标题不重复
-        titles = [a.text() for a in menu.actions()
-                  if a.text() in ("运行环境", "脚本", "诊断")]
-        self.assertEqual(titles, ["运行环境", "脚本", "诊断"])
+        dlg = self._open_settings_dialog()
+        groups = [g.title() for g in dlg.findChildren(QtWidgets.QGroupBox)]
+        for expect in ("运行组件", "脚本更新", "诊断"):
+            self.assertIn(expect, groups, f"缺少维护分组：{expect}")
+        # 运行组件组动作
+        for attr, text in (
+                ("setting_download_btn", "打开下载中心…"),
+                ("setting_recheck_btn", "重新检测组件"),
+                ("setting_runtime_dir_btn", "打开运行时目录…"),
+                ("setting_sync_btn", "同步最新脚本"),
+                ("setting_restore_btn", "恢复上一版"),
+                ("setting_log_dir_btn", "打开日志目录…"),
+                ("setting_copy_diag_btn", "复制诊断文本")):
+            self.assertTrue(hasattr(win, attr), f"缺少按钮 {attr}")
+            btn = getattr(win, attr)
+            self.assertEqual(btn.text(), text)
+            # 动作仍连接（可达）
+            self.assertTrue(btn.isEnabled())
+        win._setting_dialog = None
+        win._setting_refresh = None
 
     def test_takeover_confirm_cancelled_no_side_effect(self):
         """菜单语义：接管 ADB 需确认；拒绝时不做任何接管。"""
         win = self.win
         win._running = False
-        from unittest import mock
         with mock.patch.object(QtWidgets.QMessageBox, "question",
                                return_value=QtWidgets.QMessageBox.No):
             win._on_takeover_adb()
         self.assertEqual(win.adb.takeover_calls, 0)
+
+
+class RuntimeAutoPromptTest(_UiCase):
+    """SPEC 2：初次后台完整检测为非就绪时 UI 空闲后自动打开下载中心一次；
+    已就绪不弹；同缺件状态不连续弹多个窗口；运行中/检测异常不弹。"""
+
+    def _install_fake(self):
+        """替换 app 模块内 RuntimeDownloadDialog 为计数 stub。"""
+        opens = {"count": 0, "instances": []}
+
+        class _Fake(QtWidgets.QDialog):
+            def __init__(self, settings, parent=None, warn_missing=False):
+                super().__init__(parent)
+                opens["count"] += 1
+                opens["instances"].append(self)
+                self.warn_missing = warn_missing
+
+            def exec(self):
+                return 0
+        patcher = mock.patch("desktop_app.app.RuntimeDownloadDialog", _Fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return opens
+
+    def test_missing_prompts_dialog_once_only(self):
+        win = self.win
+        opens = self._install_fake()
+        win._apply_runtime_status(False, "缺少运行组件", ["torch"],
+                                  auto_prompt=True)
+        self._pump_once()
+        self.assertEqual(opens["count"], 1)
+        # 再次触发同一缺件状态：不应连续再弹
+        win._apply_runtime_status(False, "缺少运行组件", ["torch"],
+                                  auto_prompt=True)
+        self._pump_once()
+        self.assertEqual(opens["count"], 1)
+
+    def test_ready_no_prompt(self):
+        win = self.win
+        opens = self._install_fake()
+        win._apply_runtime_status(True, "运行组件就绪", [], auto_prompt=True)
+        self._pump_once()
+        self.assertEqual(opens["count"], 0)
+
+    def test_missing_but_running_no_prompt(self):
+        win = self.win
+        opens = self._install_fake()
+        win._running = True
+        try:
+            win._apply_runtime_status(False, "缺少运行组件", ["torch"],
+                                      auto_prompt=True)
+            self._pump_once()
+            self.assertEqual(opens["count"], 0)
+        finally:
+            win._running = False  # 避免 closeEvent 弹“仍在运行”确认框
+
+    def test_exception_result_no_missing_no_prompt(self):
+        """检测异常（missing 空但 ok=False 的异常路径）不弹。"""
+        win = self.win
+        opens = self._install_fake()
+        win._apply_runtime_status(False, "校验异常", [], auto_prompt=True)
+        self._pump_once()
+        self.assertEqual(opens["count"], 0)
+
+    def test_auto_dialog_gets_warn_missing_flag(self):
+        """自动打开的下载中心以 warn_missing=True 构造（顶部警告）。"""
+        win = self.win
+        opens = self._install_fake()
+        win._apply_runtime_status(False, "缺少运行组件", ["torch"],
+                                  auto_prompt=True)
+        self._pump_once()
+        self.assertEqual(opens["count"], 1)
+        self.assertTrue(opens["instances"][0].warn_missing)
+
+    def _pump_once(self):
+        self._app.processEvents()
+        end = time.time() + 0.05
+        while time.time() < end:
+            self._app.processEvents()
+            time.sleep(0.005)
+
+
+class DownloadDialogSourceTest(_UiCase):
+    """SPEC 3：下载中心新增下载源选择并持久化；缺件警告横幅存在且可关。"""
+
+    def _make_dialog(self, warn=False):
+        from desktop_app.download_dialog import RuntimeDownloadDialog
+        dlg = RuntimeDownloadDialog(self.settings, parent=self.win,
+                                    warn_missing=warn)
+        self.addCleanup(dlg.close)
+        return dlg
+
+    def test_source_combo_options_fixed(self):
+        """下载源下拉固定四项（智能/清华/阿里/官方），无自定义 URL 输入。"""
+        dlg = self._make_dialog()
+        combo = dlg.source_combo
+        modes = [combo.itemData(i) for i in range(combo.count())]
+        self.assertEqual(modes,
+                         ["smart", "tuna", "aliyun", "official"])
+        # 无 URL 输入框（没有任何 QLineEdit 用于自定义源）
+        from PySide6 import QtWidgets as W
+        self.assertEqual(len(dlg.findChildren(W.QLineEdit)), 0)
+
+    def test_source_selection_persists(self):
+        """切换下载源并持久化到 SettingsStore。"""
+        dlg = self._make_dialog()
+        self.assertEqual(self.settings.pip_source, "smart")
+        idx = dlg.source_combo.findData("aliyun")
+        dlg.source_combo.setCurrentIndex(idx)
+        self.assertEqual(self.settings.pip_source, "aliyun")
+        # 持久化到磁盘可被新 store 读取
+        from desktop_app.settings_store import SettingsStore
+        store2 = SettingsStore(self.data_dir)
+        self.assertEqual(store2.pip_source, "aliyun")
+
+    def test_warn_banner_visible_only_when_requested(self):
+        """缺件自动打开带警告横幅且可关闭；手动打开默认无横幅。"""
+        # offscreen 不 exec，用显式可见标志 + 隐藏属性验证
+        dlg = self._make_dialog(warn=True)
+        self.assertTrue(dlg.warn_missing)
+        self.assertFalse(dlg.warn_banner.isHidden(),
+                         "缺件警告横幅应可见（未被隐藏）")
+        dlg.warn_close_btn.click()
+        self.assertTrue(dlg.warn_banner.isHidden(),
+                        "点击“知道了”后横幅应隐藏")
+        dlg.close()
+        dlg2 = self._make_dialog(warn=False)
+        self.assertFalse(dlg2.warn_missing)
+        self.assertTrue(dlg2.warn_banner.isHidden(),
+                        "手动打开默认无警告横幅")
+
+    def test_dialog_has_copy_diagnostics_button(self):
+        dlg = self._make_dialog()
+        self.assertEqual(dlg.copy_log_btn.text(), "复制诊断文本")
+        self.assertTrue(dlg.copy_log_btn.isEnabled())
 
 
 class LogCollapseTest(_UiCase):

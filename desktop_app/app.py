@@ -3,10 +3,8 @@
 工作台骨架（任务执行为中心）：
 - 紧凑品牌条（透明浅条）：Coin11 logo + 应用名 + “轻量版”标签 + 连接状态 + 设置；
 - 紧凑设备/上下文条：设备下拉 + 刷新（设备选择保留在一级），`设备 ▾` 二级菜单
-  收纳“刷新设备 / 重新接管 ADB / 设备连接说明”；`维护 ▾` 菜单按 运行环境 /
-  脚本 / 诊断 分组收纳原“运行组件”与“上游脚本版本”两张大卡的全部动作
-  （下载中心 / 重新检测组件 / 运行时目录 / 同步最新脚本 / 恢复上一版 /
-  打开日志目录 / 复制诊断文本）；
+  收纳“刷新设备 / 重新接管 ADB / 设备连接说明”；原“维护”下拉已删除，其全部
+  动作（运行环境 / 脚本 / 诊断）迁入“设置与维护”对话框；
 - QSplitter 双面板弹性主体：左侧任务面板 = 固定头部 + 任务滚动 + 底部固定选择
   工具栏（滚动区与工具栏结构分离）；右侧运行面板 = 选中计数 + 运行组件摘要 +
   开始 / 停止 / 状态胶囊 / 当前状态 / 任务计数 / 进度。窗口窄于 980px 时
@@ -534,6 +532,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_device_state(initial=True)
         self._runtime_ready = False
         self._runtime_missing = []
+        # 缺件自动打开下载中心的单次状态（SPEC 2）：初次后台全量检测结果
+        # 为“非就绪”且 UI 空闲后自动打开一次；已弹过/已就绪/检测异常/
+        # 运行中不弹；可关闭稍后处理，不自动发起下载。
+        self._runtime_prompted_once = False
+        self._runtime_dialog_open = False
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(500)
@@ -559,7 +562,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # ---- 紧凑品牌条 ----
         self._build_brand_bar(root)
 
-        # ---- 紧凑设备/上下文条：设备（一级）+ 设备▾ / 维护▾（二级） ----
+        # ---- 紧凑设备/上下文条：设备（一级）+ 设备▾（二级） ----
         self._build_tool_strip(root)
 
         # ---- 工作台：QSplitter(任务面板 | 运行面板)（弹性主体） ----
@@ -584,8 +587,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setFont(base_font)
         self._populate_tasks()
         self._refresh_version()
-        # 后台检测运行组件（不阻塞首屏），结果只写日志/状态条与缺件提示
-        QtCore.QTimer.singleShot(300, lambda: self._refresh_runtime_status())
+        # 后台检测运行组件（不阻塞首屏）：结果写日志/状态条；若初次检测
+        # 为非就绪，UI 空闲后自动打开一次下载中心（带顶部警告）。
+        QtCore.QTimer.singleShot(
+            300, lambda: self._refresh_runtime_status(auto_prompt=True))
 
     def _build_brand_bar(self, root: QtWidgets.QVBoxLayout) -> None:
         """顶栏（52–56px 级）：小 logo + 产品名 + 轻量版标签；右侧 ADB 状态 + 设置。
@@ -627,7 +632,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connection_pill("正在检测…", ok=False)
 
     def _build_tool_strip(self, root: QtWidgets.QVBoxLayout) -> None:
-        """上下文条：设备下拉 + 刷新（一级）；`设备` 与 `维护` 为菜单入口。"""
+        """上下文条：设备下拉 + 刷新；`设备` 为菜单入口（维护动作在设置对话框）。"""
         strip = QtWidgets.QFrame()
         strip.setObjectName("toolStrip")
         row = QtWidgets.QHBoxLayout(strip)
@@ -656,7 +661,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         row.addStretch(1)
         self._build_device_menu_button(row)
-        self._build_maintain_menu_button(row)
         root.addWidget(strip)
 
     def _build_device_menu_button(self, row: QtWidgets.QHBoxLayout) -> None:
@@ -673,40 +677,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_menu_btn.setMenu(menu)
         self.device_menu_btn.setToolTip("刷新设备 / 重新接管 ADB / 设备连接说明")
         row.addWidget(self.device_menu_btn)
-
-    def _build_maintain_menu_button(self, row: QtWidgets.QHBoxLayout) -> None:
-        """维护 ▾：按 运行环境 / 脚本 / 诊断 分组的菜单（动作保留原 handler）。"""
-        self.maintain_menu_btn = QtWidgets.QPushButton("维护")
-        self.maintain_menu_btn.setObjectName("menuBtn")
-        menu = QtWidgets.QMenu(self.maintain_menu_btn)
-
-        # ---- 运行环境 ----
-        menu.addSection("运行环境")
-        act_download = menu.addAction("下载中心")
-        act_download.setToolTip("下载 / 安装 / 修复任务运行必需组件")
-        act_download.triggered.connect(self._on_open_download_center)
-        act_check = menu.addAction("重新检测组件")
-        act_check.triggered.connect(self._on_refresh_runtime_status)
-        act_runtime_dir = menu.addAction("运行时目录…")
-        act_runtime_dir.triggered.connect(self._on_show_runtime_dir)
-        # ---- 脚本 ----
-        menu.addSection("脚本")
-        self.sync_action = menu.addAction("同步最新脚本")
-        self.sync_action.triggered.connect(self._on_sync)
-        self.restore_action = menu.addAction("恢复上一版")
-        self.restore_action.triggered.connect(self._on_restore)
-        # ---- 诊断 ----
-        menu.addSection("诊断")
-        act_open_log = menu.addAction("打开日志目录")
-        act_open_log.triggered.connect(self._on_open_log_dir)
-        act_copy = menu.addAction("复制诊断文本")
-        act_copy.triggered.connect(self._on_copy_diag)
-        self.maintain_menu = menu
-        self.maintain_menu_btn.setMenu(menu)
-        self.maintain_menu_btn.setToolTip(
-            "运行环境：下载中心 / 重新检测组件 / 运行时目录；"
-            "脚本：同步最新脚本 / 恢复上一版；诊断：打开日志目录 / 复制诊断文本")
-        row.addWidget(self.maintain_menu_btn)
 
     def _set_connection_pill(self, text: str, ok: bool = True) -> None:
         self.conn_dot.setText("●")
@@ -1247,23 +1217,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------- 运行组件 / 维护
     def _on_refresh_runtime_status(self):
-        self._refresh_runtime_status()
+        # 手动“重新检测组件”（设置对话框动作）不触发缺件自动弹窗
+        self._refresh_runtime_status(auto_prompt=False)
 
-    def _refresh_runtime_status(self, background: bool = True):
-        """后台线程全量检测运行组件；UI 状态回到 GUI 线程（不再占用大卡）。"""
+    def _refresh_runtime_status(self, background: bool = True,
+                                auto_prompt: bool = False):
+        """后台线程全量检测运行组件；UI 状态回到 GUI 线程（不再占用大卡）。
+
+        auto_prompt=True：仅当这是进程内初次后台完整检测、且结果为“非就绪”
+        时，UI 空闲后自动打开一次 RuntimeDownloadDialog（带顶部缺件警告）。
+        """
         self.statusBar().showMessage("正在重新检测运行组件…")
         rt_dir = resolve_data_runtime_dir(self.settings)
 
         def _do():
             ok, message, missing = ensure_runtime_ready(rt_dir)
-            self._on_ui(lambda: self._apply_runtime_status(ok, message, missing))
+            self._on_ui(lambda: self._apply_runtime_status(
+                ok, message, missing, auto_prompt=auto_prompt))
 
         if background:
             threading.Thread(target=_do, daemon=True).start()
         else:
             _do()
 
-    def _apply_runtime_status(self, ok: bool, message: str, missing: list):
+    def _apply_runtime_status(self, ok: bool, message: str, missing: list,
+                              auto_prompt: bool = False):
         self._runtime_ready = ok
         self._runtime_missing = list(missing)
         if ok:
@@ -1278,7 +1256,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.runtime_hint.setObjectName("stateTagErr")
             self.runtime_hint.setToolTip(
                 "任务运行需要内置 Python 运行时与依赖组件。\n"
-                "请打开 维护 ▾ → 运行环境 → 下载中心 下载必需组件。")
+                "请打开 设置 → 运行组件 → 下载中心 下载必需组件。")
             style = self.runtime_hint.style()
             style.unpolish(self.runtime_hint)
             style.polish(self.runtime_hint)
@@ -1287,8 +1265,39 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "run_comp_summary"):
                 self.run_comp_summary.setText("运行组件：缺少必需组件")
                 self.run_comp_summary.setStyleSheet("color: #a33a2f;")
+            # 初次后台完整检测为非就绪：UI 空闲后自动打开一次下载中心。
+            # 检测异常（missing 为空）不弹；运行中不弹；同一缺件状态不连续
+            # 弹多个窗口（_runtime_prompted_once 保证每个进程仅一次）。
+            if auto_prompt and not self._runtime_prompted_once \
+                    and not self._runtime_dialog_open \
+                    and not getattr(self, "_running", False) \
+                    and self._runtime_missing:
+                self._runtime_prompted_once = True
+                self._open_download_center_auto()
         # 缺组件时任务仍可勾选，但开始运行会被拦截并引导下载中心
         self._log_line(f"[运行时] {message}")
+
+    def _open_download_center_auto(self):
+        """UI 空闲后自动打开下载中心（带缺件警告；不强制下载/不自动请求）。"""
+        QtCore.QTimer.singleShot(0, self._open_download_dialog_auto)
+
+    def _open_download_dialog_auto(self):
+        if getattr(self, "_runtime_dialog_open", False) \
+                or getattr(self, "_running", False):
+            return
+        self._runtime_dialog_open = True
+
+        def _closed():
+            self._runtime_dialog_open = False
+
+        dlg = RuntimeDownloadDialog(self.settings, parent=self,
+                                    warn_missing=True)
+        try:
+            dlg.finished.connect(lambda _r: _closed())
+            dlg.exec()
+        finally:
+            self._runtime_dialog_open = False
+            self._refresh_runtime_status()
 
     def _on_show_runtime_dir(self):
         rt = resolve_data_runtime_dir(self.settings)
@@ -1327,8 +1336,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self, "正在运行", "任务运行中不能同步脚本，请先停止。")
             return
-        self.sync_action.setEnabled(False)
-        self.restore_action.setEnabled(False)
+        if hasattr(self, "setting_sync_btn"):
+            self.setting_sync_btn.setEnabled(False)
         threading.Thread(target=self._sync_worker, daemon=True).start()
 
     def _sync_worker(self):
@@ -1345,15 +1354,15 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log_line(f"[错误] 同步失败：{exc}")
         finally:
-            self._on_ui(lambda: (self.sync_action.setEnabled(True),
-                                 self.restore_action.setEnabled(True)))
+            self._on_ui(self._settings_sync_finished)
 
     def _on_restore(self):
         if self._running:
             QtWidgets.QMessageBox.information(
                 self, "正在运行", "任务运行中不能回退脚本，请先停止。")
             return
-        self.restore_action.setEnabled(False)
+        if hasattr(self, "setting_restore_btn"):
+            self.setting_restore_btn.setEnabled(False)
         threading.Thread(target=self._restore_worker, daemon=True).start()
 
     def _restore_worker(self):
@@ -1369,7 +1378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log_line(f"[错误] 回退失败：{exc}")
         finally:
-            self._on_ui(lambda: self.restore_action.setEnabled(True))
+            self._on_ui(self._settings_sync_finished)
 
     # ------------------------------------------------------------ 运行控制
     def _on_start_run(self):
@@ -1647,18 +1656,68 @@ class MainWindow(QtWidgets.QMainWindow):
             sb = self.log_view.verticalScrollBar()
             sb.setValue(sb.maximum())
 
-    # ------------------------------------------------------------ 设置/关于
+    # ------------------------------------------------------------ 设置/维护
     def _show_settings(self):
+        """“设置与维护”对话框：运行组件 / 脚本更新 / 诊断 + 自动接管 ADB。
+
+        原工具条“维护 ▾”菜单的全部动作迁入此处（SPEC 1），按
+        运行组件（下载中心、重新检测组件、打开运行时目录）、脚本更新（同步
+        最新脚本、恢复上一版）、诊断（打开日志目录、复制诊断文本）分组；
+        动作全部复用既有 handler，运行中禁用规则保持。
+        """
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("设置与关于")
+        dlg.setWindowTitle("设置与维护")
         lay = QtWidgets.QVBoxLayout(dlg)
-        form = QtWidgets.QFormLayout()
+        lay.setSpacing(8)
+        # ---- 运行组件 ----
+        comp_group = QtWidgets.QGroupBox("运行组件")
+        comp_form = QtWidgets.QVBoxLayout(comp_group)
+        self.setting_download_btn = QtWidgets.QPushButton("打开下载中心…")
+        self.setting_download_btn.setToolTip(
+            "下载 / 安装 / 修复任务运行必需组件（依赖锁定、来源官方）")
+        self.setting_download_btn.clicked.connect(self._on_open_download_center)
+        self.setting_recheck_btn = QtWidgets.QPushButton("重新检测组件")
+        self.setting_recheck_btn.setToolTip("后台全量检测运行组件是否就绪")
+        self.setting_recheck_btn.clicked.connect(self._on_refresh_runtime_status)
+        self.setting_runtime_dir_btn = QtWidgets.QPushButton("打开运行时目录…")
+        self.setting_runtime_dir_btn.clicked.connect(self._on_show_runtime_dir)
+        for b in (self.setting_download_btn, self.setting_recheck_btn,
+                  self.setting_runtime_dir_btn):
+            comp_form.addWidget(b)
+        lay.addWidget(comp_group)
+
+        # ---- 脚本更新 ----
+        upd_group = QtWidgets.QGroupBox("脚本更新")
+        upd_form = QtWidgets.QVBoxLayout(upd_group)
+        self.setting_sync_btn = QtWidgets.QPushButton("同步最新脚本")
+        self.setting_sync_btn.clicked.connect(self._on_sync)
+        self.setting_restore_btn = QtWidgets.QPushButton("恢复上一版")
+        self.setting_restore_btn.clicked.connect(self._on_restore)
+        upd_form.addWidget(self.setting_sync_btn)
+        upd_form.addWidget(self.setting_restore_btn)
+        lay.addWidget(upd_group)
+
+        # ---- 诊断 ----
+        diag_group = QtWidgets.QGroupBox("诊断")
+        diag_form = QtWidgets.QVBoxLayout(diag_group)
+        self.setting_log_dir_btn = QtWidgets.QPushButton("打开日志目录…")
+        self.setting_log_dir_btn.clicked.connect(self._on_open_log_dir)
+        self.setting_copy_diag_btn = QtWidgets.QPushButton("复制诊断文本")
+        self.setting_copy_diag_btn.clicked.connect(self._on_copy_diag)
+        diag_form.addWidget(self.setting_log_dir_btn)
+        diag_form.addWidget(self.setting_copy_diag_btn)
+        lay.addWidget(diag_group)
+
+        # ---- 通用设置 ----
+        auto_group = QtWidgets.QGroupBox("通用")
+        auto_form = QtWidgets.QVBoxLayout(auto_group)
         self.auto_check = QtWidgets.QCheckBox("运行前自动接管 ADB（默认开启）")
         self.auto_check.setChecked(self.settings.auto_takeover_adb)
         self.auto_check.toggled.connect(
             lambda on: self.settings.set("auto_takeover_adb", on))
-        form.addRow(self.auto_check)
-        lay.addLayout(form)
+        auto_form.addWidget(self.auto_check)
+        lay.addWidget(auto_group)
+
         info = QtWidgets.QLabel()
         info.setObjectName("aboutText")
         info.setWordWrap(True)
@@ -1683,11 +1742,41 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         info.setText("\n".join(lines))
         lay.addWidget(info)
+        # 运行中禁用规则：任务运行期间脚本更新动作不可用（与原菜单语义一致）
+        running = bool(self._running)
+        self.setting_sync_btn.setEnabled(not running)
+        self.setting_restore_btn.setEnabled(not running)
+        if running:
+            self.setting_sync_btn.setToolTip("任务运行中不能同步脚本，请先停止")
+            self.setting_restore_btn.setToolTip("任务运行中不能回退脚本，请先停止")
+        self._setting_dialog = dlg
+
+        def _refresh_dialog():
+            # 同步/回退完成后恢复可用（worker 内通过 _on_ui 调度）
+            if hasattr(self, "setting_sync_btn"):
+                self.setting_sync_btn.setEnabled(True)
+            if hasattr(self, "setting_restore_btn"):
+                self.setting_restore_btn.setEnabled(True)
+
+        self._setting_refresh = _refresh_dialog
+
+        def _dialog_closed(_r):
+            # 对话框关闭后按钮对象将被销毁：断开回调，避免 worker 碰已删对象
+            self._setting_dialog = None
+            self._setting_refresh = None
+
+        dlg.finished.connect(_dialog_closed)
         close_btn = QtWidgets.QPushButton("关闭")
         close_btn.clicked.connect(dlg.accept)
         lay.addWidget(close_btn, 0, alignment=QtCore.Qt.AlignRight)
-        dlg.resize(560, 420)
+        dlg.resize(620, 720)
         dlg.exec()
+
+    def _settings_sync_finished(self):
+        """设置对话框内同步/回退完成后恢复按钮（worker 经 _on_ui 调用）。"""
+        fn = getattr(self, "_setting_refresh", None)
+        if fn is not None:
+            fn()
 
     def _on_open_log_dir(self):
         log_dir = os.path.join(self.settings.data_dir, "logs")

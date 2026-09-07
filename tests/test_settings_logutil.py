@@ -24,6 +24,18 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertTrue(store.auto_takeover_adb)
         self.assertEqual(store.last_device_serial, "")
         self.assertEqual(store.last_task_ids, [])
+        # 下载源默认智能（SPEC 3）
+        self.assertEqual(store.pip_source, "smart")
+
+    def test_pip_source_roundtrip(self):
+        store = SettingsStore(self.dir)
+        store.set("pip_source", "aliyun")
+        store2 = SettingsStore(self.dir)
+        self.assertEqual(store2.pip_source, "aliyun")
+        # 损坏/未知值回默认 smart
+        store2.set("pip_source", "")
+        store3 = SettingsStore(self.dir)
+        self.assertEqual(store3.pip_source, "smart")
 
     def test_roundtrip_and_atomic(self):
         store = SettingsStore(self.dir)

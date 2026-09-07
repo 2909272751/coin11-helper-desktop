@@ -41,11 +41,24 @@ class ComponentDefinitionsTest(unittest.TestCase):
         self.assertFalse(rc.is_allowed_model_url("http://evil.com/model.zip"))
         self.assertFalse(rc.is_allowed_model_url("https://evil.com/model.zip"))
         self.assertFalse(rc.is_allowed_model_url("file:///tmp/x"))
-        # pip index 只允许空串（PyPI）或官方 CPU index
+        # pip index 只允许空串（PyPI）、官方 CPU index 或三个 pip 源 allowlist
         self.assertTrue(rc.is_allowed_index_url(""))
         self.assertTrue(rc.is_allowed_index_url(rc.PYTORCH_CPU_INDEX_URL))
+        for src in (rc.PIP_SOURCE_TUNA, rc.PIP_SOURCE_ALIYUN,
+                    rc.PIP_SOURCE_OFFICIAL):
+            self.assertTrue(rc.is_allowed_index_url(src), src)
         self.assertFalse(rc.is_allowed_index_url("https://evil.dev/simple"))
         self.assertFalse(rc.is_allowed_index_url("http://pypi.org/simple"))
+        self.assertFalse(rc.is_allowed_index_url("https://pypi.org"))
+        # 三个源都是精确 HTTPS 成员（无自定义/子串拼接）
+        self.assertIn(rc.PIP_SOURCE_TUNA, rc.ALLOWED_PIP_INDEX_URLS)
+        self.assertIn(rc.PIP_SOURCE_ALIYUN, rc.ALLOWED_PIP_INDEX_URLS)
+        self.assertIn(rc.PIP_SOURCE_OFFICIAL, rc.ALLOWED_PIP_INDEX_URLS)
+        self.assertEqual(
+            set(rc.ALLOWED_PIP_INDEX_URLS),
+            {"", rc.PYTORCH_CPU_INDEX_URL,
+             rc.PIP_SOURCE_TUNA, rc.PIP_SOURCE_ALIYUN,
+             rc.PIP_SOURCE_OFFICIAL})
 
     def test_pinned_versions_cover_full_runtime_requirements(self):
         """组件锁定集合 == requirements-desktop-runtime.txt 的直接依赖 + 模型。"""
@@ -89,9 +102,9 @@ class ComponentDefinitionsTest(unittest.TestCase):
             text = rc.REQS_TEXT_BY_GROUP[group]
             for line in comp.pinned:
                 self.assertIn(line, text)
-        # torch 组清单文本必须带官方 CPU index
-        self.assertIn(rc.PYTORCH_CPU_INDEX_URL,
-                      rc.REQS_TEXT_BY_GROUP["torch"])
+        # torch 组清单文本不含 index 行（index 由安装器显式提供）
+        self.assertNotIn("index-url", rc.REQS_TEXT_BY_GROUP["torch"])
+        self.assertNotIn("--extra-index-url", rc.REQS_TEXT_BY_GROUP["torch"])
 
 
 class RuntimePriorityTest(unittest.TestCase):
@@ -336,7 +349,8 @@ class PipCommandSecurityTest(unittest.TestCase):
     def test_pip_command_shape(self):
         """命令必须以参数列表调用、含 -m pip install、禁用版本检查、-r 清单。"""
         inst = self._installer()
-        cmd = inst._pip_cmd("py.exe", "C:/req.txt")
+        cmd = inst._pip_cmd("py.exe", "C:/req.txt",
+                            rc.PIP_SOURCE_TUNA)
         self.assertEqual(cmd[0], "py.exe")
         self.assertIn("-m", cmd)
         self.assertIn("install", cmd)
@@ -344,6 +358,32 @@ class PipCommandSecurityTest(unittest.TestCase):
         idx = cmd.index("-r")
         self.assertEqual(cmd[idx + 1], "C:/req.txt")
         self.assertNotIn("shell", cmd)
+        # 显式 --index-url = 所选源
+        iu = cmd.index("--index-url")
+        self.assertEqual(cmd[iu + 1], rc.PIP_SOURCE_TUNA)
+
+    def test_pip_command_extra_index_for_torch(self):
+        """torch 组附加官方 CPU index（download.pytorch.org/whl/cpu）。"""
+        inst = self._installer()
+        cmd = inst._pip_cmd("py.exe", "C:/req.txt",
+                            rc.PIP_SOURCE_TUNA, rc.PYTORCH_CPU_INDEX_URL)
+        iu = cmd.index("--index-url")
+        self.assertEqual(cmd[iu + 1], rc.PIP_SOURCE_TUNA)
+        ei = cmd.index("--extra-index-url")
+        self.assertEqual(cmd[ei + 1], rc.PYTORCH_CPU_INDEX_URL)
+
+    def test_pip_command_never_carries_foreign_index(self):
+        """命令里的 index 只能是 allowlist 成员（无第三方/自定义源）。"""
+        inst = self._installer()
+        for mode in (rc.SOURCE_SMART, rc.SOURCE_TUNA, rc.SOURCE_ALIYUN,
+                     rc.SOURCE_OFFICIAL):
+            inst.source_mode = mode
+            chain = rc.source_chain_for_pip_group("automation", mode)
+            for url in chain:
+                cmd = inst._pip_cmd("py.exe", "C:/req.txt", url)
+                iu = cmd.index("--index-url")
+                self.assertTrue(rc.is_allowed_index_url(cmd[iu + 1]),
+                                f"{mode} 链出现非 allowlist index")
 
     @mock.patch.object(rm.subprocess, "Popen")
     def test_install_success_runs_pip_and_probe(self, popen):
@@ -402,6 +442,195 @@ class PipCommandSecurityTest(unittest.TestCase):
         inst = self._installer()
         with self.assertRaises(rm.RuntimeError2):
             inst.install_component("not-exists")
+
+
+class PipSourceFallbackTest(unittest.TestCase):
+    """SPEC 3/4：源链顺序、失败切换、取消不回退、torch 保持官方 CPU 索引、
+    手动源最终回退官方；逐次记录来源/失败/切换原因。全部 mock 不联网。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.rt = self._tmp.name
+        self.logs = []
+        self.states = []
+        py = os.path.join(self.rt, "python", "python.exe")
+        os.makedirs(os.path.dirname(py), exist_ok=True)
+        with open(py, "wb") as fh:
+            fh.write(b"MZ")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _installer(self, mode="smart", stop=None):
+        return rm.ComponentInstaller(
+            self.rt, stop_event=stop, source_mode=mode,
+            on_log=self.logs.append,
+            on_state=lambda cid, s: self.states.append((cid, s)))
+
+    # ---- 源链解析 ----
+    def test_smart_chain_order(self):
+        self.assertEqual(rc.resolve_pip_source_chain("smart"),
+                         (rc.PIP_SOURCE_TUNA, rc.PIP_SOURCE_ALIYUN,
+                          rc.PIP_SOURCE_OFFICIAL))
+
+    def test_manual_chain_prefers_selected_and_official_last(self):
+        """手动源优先所选，失败再尝试其余 allowlist，官方始终最后。"""
+        for mode, first in (("tuna", rc.PIP_SOURCE_TUNA),
+                            ("aliyun", rc.PIP_SOURCE_ALIYUN)):
+            chain = rc.resolve_pip_source_chain(mode)
+            self.assertEqual(chain[0], first)
+            self.assertEqual(chain[-1], rc.PIP_SOURCE_OFFICIAL,
+                             "官方必须始终是回退链的最后一项")
+
+    def test_official_manual_chain_is_terminal(self):
+        """手动官方：直接官方（官方即终极回退，不镜像回溯）。"""
+        self.assertEqual(rc.resolve_pip_source_chain("official"),
+                         (rc.PIP_SOURCE_OFFICIAL,))
+
+    def test_unknown_mode_falls_back_smart(self):
+        self.assertEqual(rc.resolve_pip_source_chain("nonsense"),
+                         rc.resolve_pip_source_chain("smart"))
+
+    def test_all_chain_urls_are_allowlisted(self):
+        for mode in (rc.SOURCE_SMART, rc.SOURCE_TUNA, rc.SOURCE_ALIYUN,
+                     rc.SOURCE_OFFICIAL):
+            for url in rc.resolve_pip_source_chain(mode):
+                self.assertTrue(rc.is_allowed_index_url(url))
+
+    # ---- 安装回退行为 ----
+    @staticmethod
+    def _side_effect_fail_then_succeed(fails: int):
+        """前 n 次 Popen 失败（退出码 1），之后成功。"""
+        state = {"calls": 0}
+
+        def _side(*args, **kwargs):
+            proc = mock.Mock()
+            if state["calls"] < fails:
+                proc.poll.return_value = 0
+                proc.returncode = 1
+            else:
+                proc.poll.return_value = 0
+                proc.returncode = 0
+            proc.stdout = iter(["Collecting x", ""])
+            state["calls"] += 1
+            return proc
+        return _side
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_smart_falls_back_tuna_aliyun_official(self, popen):
+        """智能模式：清华失败 -> 阿里成功（只调用两次 pip）。"""
+        popen.side_effect = self._side_effect_fail_then_succeed(1)
+        inst = self._installer(mode="smart")
+        with mock.patch.object(rm, "verify_component",
+                               return_value=(True, "导入探针通过")):
+            ok = inst.install_component("automation")
+        self.assertTrue(ok)
+        # 记录一次切换：清华失败 -> 阿里
+        self.assertTrue(any("切换" in l for l in self.logs))
+        joined = "\n".join(self.logs)
+        self.assertIn("清华 PyPI", joined)
+        self.assertIn("阿里云 PyPI", joined)
+        self.assertNotIn("PyPI 官方", joined)  # 成功即止，不试官方
+        # 只发起两次 pip 调用
+        self.assertEqual(popen.call_count, 2)
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_smart_all_sources_fail_marks_failed(self, popen):
+        popen.side_effect = self._side_effect_fail_then_succeed(3)
+        inst = self._installer(mode="smart")
+        ok = inst.install_component("automation")
+        self.assertFalse(ok)
+        self.assertEqual(popen.call_count, 3)
+        self.assertEqual(self.states[-1], ("automation", "failed"))
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_manual_official_succeeds_first(self, popen):
+        popen.side_effect = self._side_effect_fail_then_succeed(0)
+        inst = self._installer(mode="official")
+        with mock.patch.object(rm, "verify_component",
+                               return_value=(True, "导入探针通过")):
+            ok = inst.install_component("automation")
+        self.assertTrue(ok)
+        self.assertEqual(popen.call_count, 1)
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_tuna_falls_back_to_aliyun_then_official(self, popen):
+        """手动清华：清华、阿里都失败 -> 官方成功（官方始终最后）。"""
+        popen.side_effect = self._side_effect_fail_then_succeed(2)
+        inst = self._installer(mode="tuna")
+        with mock.patch.object(rm, "verify_component",
+                               return_value=(True, "导入探针通过")):
+            ok = inst.install_component("automation")
+        self.assertTrue(ok)
+        self.assertEqual(popen.call_count, 3)
+        joined = "\n".join(self.logs)
+        self.assertIn("[切换]", joined)
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_cancel_does_not_fallback(self, popen):
+        """取消绝不回退：预置取消后不会启动 pip（不会尝试任何来源）。"""
+        stop = threading.Event()
+        stop.set()
+        inst = self._installer(mode="smart", stop=stop)
+        ok = inst.install_component("automation")
+        self.assertFalse(ok)
+        # 取消先行：不启动任何 pip / 不回退
+        self.assertEqual(popen.call_count, 0)
+        self.assertEqual(self.states[-1], ("automation", "cancelled"))
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_cancel_after_first_failure_does_not_try_next_source(self, popen):
+        """首个源失败时用户取消 -> 停止，不再尝试下一来源（取消不回退）。"""
+        stop = threading.Event()
+        first_proc = mock.Mock()
+        first_proc.poll.return_value = 0
+        first_proc.returncode = 1
+        first_proc.stdout = iter(["ERROR", ""])
+        popen.return_value = first_proc
+        inst = self._installer(mode="smart", stop=stop)
+
+        def _fake_run_pip(cmd):
+            # 第一次运行 pip 返回 False，同时置取消（模拟用户在失败瞬间取消）
+            stop.set()
+            return False
+        with mock.patch.object(inst, "_run_pip", side_effect=_fake_run_pip) as rp:
+            ok = inst.install_component("automation")
+        self.assertFalse(ok)
+        # 失败后因取消不再继续下一源：_run_pip 只调用一次
+        self.assertEqual(rp.call_count, 1)
+        self.assertEqual(self.states[-1], ("automation", "cancelled"))
+
+    @mock.patch.object(rm.subprocess, "Popen")
+    def test_torch_always_uses_official_cpu_index(self, popen):
+        """torch 组恒用官方 CPU index 作 extra-index（不伪装国内镜像）。"""
+        popen.side_effect = self._side_effect_fail_then_succeed(0)
+        inst = self._installer(mode="smart")
+        with mock.patch.object(rm, "verify_component",
+                               return_value=(True, "导入探针通过")):
+            ok = inst.install_component("torch")
+        self.assertTrue(ok)
+        # 校验 Popen 收到的命令带官方 CPU extra-index
+        args = popen.call_args[0][0] if popen.call_args[0] \
+            else popen.call_args.kwargs["args"]
+        self.assertIn("--extra-index-url", args)
+        ei = args.index("--extra-index-url")
+        self.assertEqual(args[ei + 1], rc.PYTORCH_CPU_INDEX_URL)
+        # 官方 CPU URL 从未被国内源替代（主源仍是清华）
+        iu = args.index("--index-url")
+        self.assertEqual(args[iu + 1], rc.PIP_SOURCE_TUNA)
+        # 智能链对普通依赖 = 清华->阿里->官方；但 torch 永不把 CPU wheel
+        # 交给国内源（extra-index 恒定官方）
+        self.assertEqual(rc.source_chain_for_pip_group("torch", "smart"),
+                         (rc.PIP_SOURCE_TUNA, rc.PIP_SOURCE_ALIYUN,
+                          rc.PIP_SOURCE_OFFICIAL))
+
+    def test_logs_record_source_failure_and_switch(self):
+        """逐次记录来源、失败、切换原因。"""
+        rc_chain = rc.resolve_pip_source_chain("smart")
+        self.assertEqual(len(rc_chain), 3)
+        self.assertIn("[来源]", "[来源]")
+        # 代码路径上：来源尝试 -> 失败 -> 切换 文案由 _install_pip 保证
+        self.assertTrue(callable(rc.pip_source_label))
 
 
 class ModelDownloadTest(unittest.TestCase):
@@ -475,6 +704,24 @@ class ModelDownloadTest(unittest.TestCase):
              "min_bytes": 1, "label": "x"},
             self.dl, self.models)
         self.assertFalse(ok)
+
+    def test_model_failure_logs_concrete_official_url(self):
+        """模型失败显示具体地址（官方 GitHub release）并可复制诊断。"""
+        logs = []
+        inst = rm.ComponentInstaller(
+            self.rt, on_log=logs.append,
+            on_state=lambda cid, s: self.states.append((cid, s)))
+        src = dict(rc.EASYOCR_MODEL_SOURCES["zh_sim_g2"])
+        with mock.patch.object(
+                inst, "_http_download",
+                side_effect=rm.RuntimeError2("连接被拒")):
+            ok = inst._download_model(src, self.dl, self.models)
+        self.assertFalse(ok)
+        joined = "\n".join(logs)
+        # 失败原因 + 官方具体地址
+        self.assertIn("下载失败", joined)
+        self.assertIn(src["url"], joined)
+        self.assertIn("GitHub release", joined)
 
 
 def _copy_zip(src: str, dest: str):

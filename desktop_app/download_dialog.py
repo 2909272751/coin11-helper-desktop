@@ -27,6 +27,9 @@ from .runtime_components import (
     COMPONENT_PYTHON_BOOTSTRAP,
     GROUP_LABELS,
     INSTALL_ORDER,
+    PIP_SOURCE_CHOICES,
+    SETTINGS_PIP_SOURCE_KEY,
+    SOURCE_SMART,
     STATE_CANCELLED,
     STATE_DOWNLOADING,
     STATE_FAILED,
@@ -35,6 +38,7 @@ from .runtime_components import (
     STATE_OK,
     STATE_PENDING,
     STATE_VERIFYING,
+    pip_source_mode_label,
 )
 from .runtime_manager import (
     ComponentInstaller,
@@ -114,9 +118,10 @@ class _Signals(QtCore.QObject):
 class RuntimeDownloadDialog(QtWidgets.QDialog):
     """运行组件下载中心窗口。"""
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, warn_missing=False):
         super().__init__(parent)
         self.settings = settings
+        self.warn_missing = bool(warn_missing)
         self.runtime_dir = resolve_data_runtime_dir(settings)
         self._signals = _Signals(self)
         self._signals.log_line.connect(self._append_log)
@@ -129,8 +134,8 @@ class RuntimeDownloadDialog(QtWidgets.QDialog):
         self._stop = threading.Event()
         self._busy = False
         self.setWindowTitle("运行组件下载中心")
-        self.setMinimumSize(860, 560)
-        self.resize(960, 620)
+        self.setMinimumSize(880, 600)
+        self.resize(980, 640)
         self._build_ui()
         self._refresh_fast_status()
         self._update_buttons()
@@ -168,6 +173,55 @@ class RuntimeDownloadDialog(QtWidgets.QDialog):
         hint.setObjectName("cardHint")
         hint.setWordWrap(True)
         lay.addWidget(hint)
+
+        # 顶部警告（缺件自动打开时显示；可关闭稍后处理，不强制下载）
+        self.warn_banner = QtWidgets.QFrame()
+        self.warn_banner.setObjectName("stateTagErr")
+        wrow = QtWidgets.QHBoxLayout(self.warn_banner)
+        wrow.setContentsMargins(10, 6, 10, 6)
+        wrow.setSpacing(8)
+        warn_text = QtWidgets.QLabel(
+            "⚠ 运行组件未完整安装，任务无法开始；请先下载必需组件，"
+            "或关闭本窗口稍后处理。")
+        warn_text.setObjectName("cardHint")
+        warn_text.setWordWrap(True)
+        warn_text.setStyleSheet("color: #a33a2f; font-weight: 600;")
+        self.warn_close_btn = QtWidgets.QPushButton("知道了")
+        self.warn_close_btn.setObjectName("link")
+        self.warn_close_btn.clicked.connect(
+            lambda: self.warn_banner.setVisible(False))
+        wrow.addWidget(warn_text, 1)
+        wrow.addWidget(self.warn_close_btn)
+        self.warn_banner.setVisible(self.warn_missing)
+        lay.addWidget(self.warn_banner)
+
+        # 紧凑“下载源”选择（持久化到 SettingsStore；固定四项，无自定义 URL）
+        src_row = QtWidgets.QHBoxLayout()
+        src_lab = QtWidgets.QLabel("下载源：")
+        src_lab.setObjectName("fieldLabel")
+        src_row.addWidget(src_lab)
+        self.source_combo = QtWidgets.QComboBox()
+        self.source_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToContents)
+        current = str(self.settings.get(SETTINGS_PIP_SOURCE_KEY, SOURCE_SMART))
+        idx = 0
+        for i, (mode, text) in enumerate(PIP_SOURCE_CHOICES):
+            self.source_combo.addItem(text, mode)
+            if mode == current:
+                idx = i
+        self.source_combo.setCurrentIndex(idx)
+        self.source_combo.setToolTip(
+            "pip 依赖下载源：智能 = 清华→阿里→官方顺序重试；"
+            "手动源优先所选，失败再试其余，官方始终最后。PyTorch CPU wheel"
+            " 恒用官方索引（download.pytorch.org/whl/cpu）。")
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
+        src_row.addWidget(self.source_combo)
+        src_row.addStretch(1)
+        mirror_hint = QtWidgets.QLabel(
+            "国内镜像仅覆盖 pip 依赖；PyTorch CPU 与 EasyOCR 模型保持官方来源。")
+        mirror_hint.setObjectName("cardHint")
+        src_row.addWidget(mirror_hint)
+        lay.addLayout(src_row)
 
         # 运行时目录
         dir_row = QtWidgets.QHBoxLayout()
@@ -223,6 +277,17 @@ class RuntimeDownloadDialog(QtWidgets.QDialog):
         lay.addWidget(self.progress_bar)
 
         # 日志（只读）
+        log_head = QtWidgets.QHBoxLayout()
+        log_title = QtWidgets.QLabel("下载日志（失败原因与来源地址）")
+        log_title.setObjectName("cardHint")
+        log_head.addWidget(log_title)
+        log_head.addStretch(1)
+        self.copy_log_btn = QtWidgets.QPushButton("复制诊断文本")
+        self.copy_log_btn.setObjectName("link")
+        self.copy_log_btn.setToolTip("复制下方完整日志（含失败组件与其官方来源地址）")
+        self.copy_log_btn.clicked.connect(self._on_copy_diag)
+        log_head.addWidget(self.copy_log_btn)
+        lay.addLayout(log_head)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
@@ -252,6 +317,21 @@ class RuntimeDownloadDialog(QtWidgets.QDialog):
         ops.addWidget(self.stop_btn)
         ops.addWidget(self.close_btn)
         lay.addLayout(ops)
+
+    # ------------------------------------------------- 下载源 / 诊断
+    def _on_source_changed(self, _index: int):
+        """下载源选择变更：持久化到 SettingsStore（幂等；不触发网络请求）。"""
+        mode = self.source_combo.currentData()
+        if not mode:
+            return
+        self.settings.set(SETTINGS_PIP_SOURCE_KEY, mode)
+        self._append_log(f"[设置] 下载源已切换为："
+                         f"{pip_source_mode_label(mode)}。")
+
+    def _on_copy_diag(self):
+        text = self.log_view.toPlainText()
+        QtWidgets.QApplication.clipboard().setText(text)
+        self._append_log("[操作] 诊断文本已复制。")
 
     def _populate_table(self):
         self.table.setRowCount(len(_DISPLAY_ORDER))
@@ -483,7 +563,9 @@ class RuntimeDownloadDialog(QtWidgets.QDialog):
         self._set_busy(True)
         self._append_log("[开始] 安装队列：" + " → ".join(
             COMPONENT_BY_ID[c].name for c in order) + "。")
-        worker = _InstallWorker(self, self.runtime_dir, order)
+        worker = _InstallWorker(self, self.runtime_dir, order,
+                                source_mode=str(self.source_combo.currentData()
+                                                or SOURCE_SMART))
         self._worker = worker
         worker.start()
 
@@ -553,11 +635,12 @@ class _InstallWorker(threading.Thread):
     """后台安装线程：逐组件调用 ComponentInstaller（可取消）。"""
 
     def __init__(self, dialog: RuntimeDownloadDialog, runtime_dir: str,
-                 order):
+                 order, source_mode: str):
         super().__init__(daemon=True)
         self.dialog = dialog
         self.runtime_dir = runtime_dir
         self.order = order
+        self.source_mode = source_mode
         self.installer: Optional[ComponentInstaller] = None
 
     def run(self):
@@ -584,7 +667,8 @@ class _InstallWorker(threading.Thread):
                 stop_event=self.dialog._stop,
                 on_log=self.dialog.sig_log,
                 on_state=self.dialog.sig_state,
-                on_progress=self.dialog.sig_progress)
+                on_progress=self.dialog.sig_progress,
+                source_mode=self.source_mode)
             self.installer = installer
             try:
                 ok = installer.install_component(cid)

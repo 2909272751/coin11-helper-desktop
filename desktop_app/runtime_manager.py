@@ -261,7 +261,11 @@ def save_component_states(runtime_dir: str, states: Dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 
 def _write_requirements(runtime_dir: str, group: str) -> str:
-    """把内嵌锁定清单写入临时文件，返回路径（用于 pip -r）。"""
+    """把内嵌锁定清单写入临时文件，返回路径（用于 pip -r）。
+
+    清单文本不含任何 index 行：普通 PyPI 依赖的来源由安装器按所选/智能源
+    显式 --index-url 提供；torch 组 CPU wheel 恒用官方 CPU 索引（SPEC 3/4）。
+    """
     from .runtime_components import REQS_TEXT_BY_GROUP
     text = REQS_TEXT_BY_GROUP.get(group, "")
     if not text:
@@ -278,13 +282,20 @@ class ComponentInstaller:
 
     stop_event 由调用方持有并跨多次安装保持（取消后不再启动新组件）。
     组件安装按依赖安全顺序由调用方队列驱动；本类只负责单组件。
+    普通 pip 依赖按下述规则选择下载源（SPEC 3）：
+      - torch 组：恒用 PyTorch 官方 CPU wheel index（download.pytorch.org/whl/cpu）；
+      - 其余组：按 source_mode 的 allowlist 链（智能 = 清华→阿里→官方；
+        手动源 = 所选优先，失败再试其余 allowlist，官方始终最后）。
+      链内上一来源失败会逐次记录原因并切换到下一来源；取消绝不回退。
     """
 
     def __init__(self, runtime_dir: str,
                  stop_event: Optional[threading.Event] = None,
                  on_log: Optional[Callable[[str], None]] = None,
                  on_state: Optional[Callable[[str, str], None]] = None,
-                 on_progress: Optional[Callable[[str, int], None]] = None):
+                 on_progress: Optional[Callable[[str, int], None]] = None,
+                 source_mode: Optional[str] = None):
+        from .runtime_components import DEFAULT_PIP_SOURCE
         self.runtime_dir = runtime_dir
         self.on_log = on_log or (lambda _t: None)
         self.on_state = on_state or (lambda _cid, _s: None)
@@ -292,6 +303,7 @@ class ComponentInstaller:
         self._stop = stop_event or threading.Event()
         self._current_op = ""
         self._thread: Optional[threading.Thread] = None
+        self.source_mode = source_mode or DEFAULT_PIP_SOURCE
 
     # ---------------- 公共 API ----------------
     def install_component(self, component_id: str) -> bool:
@@ -333,12 +345,21 @@ class ComponentInstaller:
         return self._stop.is_set()
 
     # ---------------- pip ----------------
-    def _pip_cmd(self, python_exe: str, req_file: str) -> List[str]:
-        # 锁定清单文本自带 index（torch 组带 --extra-index-url 行），
-        # 命令保持纯参数列表、无 shell、禁用 pip 版本检查。
-        return [python_exe, "-m", "pip", "install",
-                "--disable-pip-version-check", "--no-input", "--upgrade",
-                "-r", req_file]
+    def _pip_cmd(self, python_exe: str, req_file: str,
+                 index_url: str, extra_index_url: str = "") -> List[str]:
+        """普通 pip 安装命令：参数列表 + 无 shell + 禁用版本检查 + 显式源。
+
+        仅接受 allowlist 成员（调用方把关）；清单为本地文件，绝不读取远程
+        requirements。extra_index_url 供 torch 组附加官方 CPU wheel index。
+        """
+        cmd = [python_exe, "-m", "pip", "install",
+               "--disable-pip-version-check", "--no-input", "--upgrade"]
+        if index_url:
+            cmd += ["--index-url", index_url]
+        if extra_index_url:
+            cmd += ["--extra-index-url", extra_index_url]
+        cmd += ["-r", req_file]
+        return cmd
 
     def _install_pip(self, comp) -> bool:
         python_exe = runtime_data_python(self.runtime_dir)
@@ -346,13 +367,46 @@ class ComponentInstaller:
             # 兜底：源码/无基座开发路径，直接调用当前解释器（仅开发测试）
             python_exe = os.path.abspath(sys.executable)
         req_file = _write_requirements(self.runtime_dir, comp.group)
-        cmd = self._pip_cmd(python_exe, req_file)
         self.on_state(comp.id, STATE_INSTALLING)
-        self.on_log(f"[安装] 安装 {comp.name}（来源："
-                    f"{comp.index_url or 'PyPI 官方'}）…")
+        from .runtime_components import (
+            pip_source_label,
+            pip_source_mode_label,
+            source_chain_for_pip_group,
+            torch_cpu_extra_index,
+        )
+        self.on_log(f"[安装] 安装 {comp.name}（下载源模式："
+                    f"{pip_source_mode_label(self.source_mode)}）…")
         self._current_op = comp.id
-        ok = self._run_pip(cmd)
+        chain = source_chain_for_pip_group(comp.group, self.source_mode)
+        # torch 组：CPU wheel 恒由官方 CPU 索引提供（SPEC 4：不伪装国内镜像）
+        extra = torch_cpu_extra_index() if comp.group == "torch" else ""
+        if not chain:
+            self.on_state(comp.id, STATE_FAILED)
+            self.on_log("[错误] 没有可用下载源（allowlist 为空）。")
+            return False
+        ok = False
+        for idx, url in enumerate(chain):
+            if self._stop.is_set():
+                self.on_state(comp.id, STATE_CANCELLED)
+                self.on_log("[取消] 安装已取消（不会回退下载源）。")
+                return False
+            label = pip_source_label(url)
+            self.on_log(f"[来源] 尝试 {label}：{url or 'PyPI 默认'}")
+            ok = self._run_pip(self._pip_cmd(python_exe, req_file, url, extra))
+            if ok:
+                self.on_log(f"[来源] {label} 安装成功。")
+                break
+            if self._stop.is_set():
+                self.on_state(comp.id, STATE_CANCELLED)
+                self.on_log("[取消] 安装已取消（不会回退下载源）。")
+                return False
+            if idx + 1 < len(chain):
+                nxt = pip_source_label(chain[idx + 1])
+                self.on_log(f"[切换] {label} 失败，改用 {nxt}。")
         if not ok:
+            self.on_state(comp.id, STATE_FAILED)
+            self.on_log(f"[错误] {comp.name} 安装失败：全部可用下载源"
+                        f"尝试完毕（或已取消）。")
             return False
         # 安装后 import 探针验证
         self.on_state(comp.id, STATE_VERIFYING)
@@ -498,16 +552,25 @@ class ComponentInstaller:
         if not is_allowed_model_url(url):
             self.on_log(f"[错误] 模型下载 URL 不在允许列表：{url}")
             return False
+        label = src.get("label") or os.path.basename(url) or url
+        # 模型来源保持官方 GitHub release；国内镜像只覆盖 pip 依赖（SPEC 4）。
+        # 任何失败都给出具体官方地址，便于复制诊断日志定位。
+        def _log_fail(reason: str):
+            self.on_log(f"[错误] {label} 下载失败：{reason}")
+            self.on_log(f"[来源] {label} 官方地址（GitHub release）：{url}")
         try:
             zip_path = os.path.join(dl_dir, os.path.basename(url) or "model.zip")
             self._http_download(url, zip_path, self._dl_progress)
+        except RuntimeError2 as exc:
+            _log_fail(exc.message)
+            return False
         except Exception as exc:  # noqa: BLE001
-            self.on_log(f"[错误] 下载失败：{redact(str(exc))}")
+            _log_fail(redact(str(exc)))
             return False
         # 最小体积校验
         try:
             if os.path.getsize(zip_path) < _MIN_MODEL_ZIP:
-                self.on_log("[错误] 下载文件过小（下载不完整或来源异常）。")
+                _log_fail("下载文件过小（下载不完整或来源异常）。")
                 return False
             target_file = src["file"]
             with zipfile.ZipFile(zip_path) as zf:
@@ -516,13 +579,13 @@ class ComponentInstaller:
                     if name != target_file:
                         continue
                     if info.file_size < src["min_bytes"]:
-                        self.on_log(f"[错误] {name} 解压内容过小（不完整）。")
+                        _log_fail(f"{name} 解压内容过小（不完整）。")
                         return False
                     tmp_pth = os.path.join(dl_dir, name + ".part")
                     with zf.open(info) as zsrc, open(tmp_pth, "wb") as zdst:
                         shutil.copyfileobj(zsrc, zdst, 1024 * 1024)
                     if os.path.getsize(tmp_pth) < src["min_bytes"]:
-                        self.on_log(f"[错误] {name} 校验失败（不完整）。")
+                        _log_fail(f"{name} 校验失败（不完整）。")
                         try:
                             os.unlink(tmp_pth)
                         except OSError:
@@ -531,12 +594,12 @@ class ComponentInstaller:
                     # 原子替换入位
                     final = os.path.join(models_dir, name)
                     os.replace(tmp_pth, final)
-                    self.on_log(f"[完成] {src['label']} 就绪：{name}")
+                    self.on_log(f"[完成] {label} 就绪：{name}")
                     return True
-            self.on_log(f"[错误] zip 内未找到 {target_file}（内容异常）。")
+            _log_fail(f"zip 内未找到 {target_file}（内容异常）。")
             return False
         except zipfile.BadZipFile:
-            self.on_log("[错误] 下载文件不是有效 zip（可能被拦截/不完整）。")
+            _log_fail("下载文件不是有效 zip（可能被拦截/不完整）。")
             return False
         finally:
             try:

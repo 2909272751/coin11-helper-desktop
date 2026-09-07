@@ -48,18 +48,54 @@ REQS_TORCH = [
     "torchvision==0.21.0+cpu",
 ]
 
-# --- HTTPS allowlist（精确值/前缀校验用）---
+# --- PyTorch CPU wheel index（官方；禁止伪装为国内镜像，SPEC 4）---
 PYTORCH_CPU_INDEX_URL = "https://download.pytorch.org/whl/cpu"
-# pip 组可用的 index URL（精确匹配；空串 = 默认 PyPI）
-ALLOWED_PIP_INDEX_URLS = frozenset({"", PYTORCH_CPU_INDEX_URL})
 
-# pip 组 -> 锁定清单文本（安装时写入临时文件，用 -r 参数化传入）
+# --- pip 下载源 allowlist（SPEC 3：固定三项，无自定义 URL；精确匹配）---
+# 注意：清华路径是 /simple，阿里云结尾带 /，官方为 /simple——按下方精确串判定。
+PIP_SOURCE_TUNA = "https://pypi.tuna.tsinghua.edu.cn/simple"
+PIP_SOURCE_ALIYUN = "https://mirrors.aliyun.com/pypi/simple/"
+PIP_SOURCE_OFFICIAL = "https://pypi.org/simple"
+# 空串保留作“默认 PyPI”（等价官方）；历史组件 index_url 校验兼容。
+ALLOWED_PIP_INDEX_URLS = frozenset({
+    "", PYTORCH_CPU_INDEX_URL,
+    PIP_SOURCE_TUNA, PIP_SOURCE_ALIYUN, PIP_SOURCE_OFFICIAL,
+})
+
+# 下载源“模式”常量（下载中心下拉值与 settings 持久化键；SPEC 3）
+SOURCE_SMART = "smart"        # 智能：清华 -> 阿里 -> 官方顺序重试
+SOURCE_TUNA = "tuna"          # 清华 PyPI
+SOURCE_ALIYUN = "aliyun"      # 阿里云 PyPI
+SOURCE_OFFICIAL = "official"  # PyPI 官方
+DEFAULT_PIP_SOURCE = SOURCE_SMART
+# settings 里持久化下载源模式的键
+SETTINGS_PIP_SOURCE_KEY = "pip_source"
+# 下载中心下拉可选项（顺序 = 界面展示顺序；值 = 模式）
+PIP_SOURCE_CHOICES = (
+    (SOURCE_SMART, "智能（清华→阿里→官方）"),
+    (SOURCE_TUNA, "清华 PyPI"),
+    (SOURCE_ALIYUN, "阿里云 PyPI"),
+    (SOURCE_OFFICIAL, "PyPI 官方"),
+)
+# 模式 -> 有序 index 链（SPEC 3）：
+#   * 智能：清华 -> 阿里 -> 官方 顺序重试；
+#   * 手动源：所选优先，失败再尝试其余 allowlist，官方始终最后；
+#   * 手动官方：官方即终极回退（其余镜像为国内源，不做官方失败后的镜像尝试）。
+PIP_SOURCE_FALLBACK_CHAIN = {
+    SOURCE_SMART: (PIP_SOURCE_TUNA, PIP_SOURCE_ALIYUN, PIP_SOURCE_OFFICIAL),
+    SOURCE_TUNA: (PIP_SOURCE_TUNA, PIP_SOURCE_ALIYUN, PIP_SOURCE_OFFICIAL),
+    SOURCE_ALIYUN: (PIP_SOURCE_ALIYUN, PIP_SOURCE_TUNA, PIP_SOURCE_OFFICIAL),
+    SOURCE_OFFICIAL: (PIP_SOURCE_OFFICIAL,),
+}
+
+# pip 组 -> 锁定清单文本（安装时写入临时文件，用 -r 参数化传入；
+# 不含任何 index 行——index 由安装器按所选/智能源显式 --index-url 提供；
+# torch 组 CPU wheel 由安装器附加官方 CPU index，见 torch_cpu_extra_index）。
 REQS_TEXT_BY_GROUP = {
     "automation": "\n".join(REQS_AUTOMATION) + "\n",
     "ocr": "\n".join(REQS_OCR) + "\n",
-    # torch 组清单自带官方 CPU index 行，与 requirements-lite-torch.txt 同源
-    "torch": "--extra-index-url " + PYTORCH_CPU_INDEX_URL + "\n"
-             + "\n".join(REQS_TORCH) + "\n",
+    # torch 组不写 extra-index（安装器始终给官方 CPU index）
+    "torch": "\n".join(REQS_TORCH) + "\n",
 }
 
 # 模型下载允许的主机（github.com / objects.githubusercontent.com 官方 release）
@@ -102,7 +138,55 @@ def is_allowed_model_url(url: str) -> bool:
 
 
 def is_allowed_index_url(url: str) -> bool:
+    """普通 pip 下载源 URL 校验：HTTPS allowlist 精确成员之一或空串。"""
     return url in ALLOWED_PIP_INDEX_URLS
+
+
+def pip_source_label(source_url: str) -> str:
+    """把源 URL 映射为中文标签（用于日志“来源/切换原因”可读）。"""
+    return {
+        PIP_SOURCE_TUNA: "清华 PyPI",
+        PIP_SOURCE_ALIYUN: "阿里云 PyPI",
+        PIP_SOURCE_OFFICIAL: "PyPI 官方",
+        "": "PyPI 官方",
+    }.get(source_url, source_url or "PyPI 官方")
+
+
+def pip_source_mode_label(mode: str) -> str:
+    """下载源模式 -> 中文标签（日志/界面用）；未知回“智能”。"""
+    return {
+        SOURCE_SMART: "智能（清华→阿里→官方）",
+        SOURCE_TUNA: "清华 PyPI",
+        SOURCE_ALIYUN: "阿里云 PyPI",
+        SOURCE_OFFICIAL: "PyPI 官方",
+    }.get(mode, "智能（清华→阿里→官方）")
+
+
+def resolve_pip_source_chain(mode: str) -> tuple:
+    """按下载源模式返回有序 index URL 链；未知模式回退默认链。
+
+    只返回 allowlist 成员；返回链始终保证“官方源在链尾（若链中有官方）”。
+    """
+    chain = PIP_SOURCE_FALLBACK_CHAIN.get(mode)
+    if not chain:
+        chain = PIP_SOURCE_FALLBACK_CHAIN[DEFAULT_PIP_SOURCE]
+    out = [u for u in chain if is_allowed_index_url(u)]
+    return tuple(out)
+
+
+def source_chain_for_pip_group(group: str, mode: str) -> tuple:
+    """返回某 pip 组在所选模式下的普通 PyPI 下载源回退链（SPEC 3）。
+
+    普通 pip 依赖（含 torch 的传递依赖）按所选/智能源链（清华→阿里→官方，
+    官方始终最后）；torch 组的 CPU wheel 固定由安装器附加官方 CPU index
+    （见 torch_cpu_extra_index），绝不伪装为国内镜像（SPEC 4）。
+    """
+    return resolve_pip_source_chain(mode)
+
+
+def torch_cpu_extra_index() -> str:
+    """torch 组安装必须附加的官方 CPU wheel index（download.pytorch.org/whl/cpu）。"""
+    return PYTORCH_CPU_INDEX_URL
 
 
 # ---------------------------------------------------------------------------

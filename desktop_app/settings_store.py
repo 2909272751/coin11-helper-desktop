@@ -1,6 +1,6 @@
 """设置持久化（%LOCALAPPDATA%\\Coin11Helper）。
 
-存储上次设备/任务选择、自动接管 ADB 开关、最近一次结果摘要等。
+存储上次设备/任务选择、自动接管 ADB 开关、最近一次结果摘要、下载源模式等。
 JSON 原子写入，任何时刻读取都得到完整旧值或完整新值。
 """
 from __future__ import annotations
@@ -19,6 +19,8 @@ _DEFAULTS = {
     "last_run_at": "",
     # 0.4.0 轻量版：数据运行时目录（空 = 默认 %LOCALAPPDATA%\\Coin11Helper\\runtime）
     "runtime_dir": "",
+    # 下载中心 pip 下载源模式（smart/tuna/aliyun/official，见 runtime_components）
+    "pip_source": "smart",
 }
 
 
@@ -76,3 +78,9 @@ class SettingsStore:
     @property
     def auto_takeover_adb(self) -> bool:
         return bool(self._values.get("auto_takeover_adb", True))
+
+    @property
+    def pip_source(self) -> str:
+        """当前 pip 下载源模式（默认 smart）。"""
+        val = self._values.get("pip_source", "smart")
+        return val if isinstance(val, str) and val else "smart"
